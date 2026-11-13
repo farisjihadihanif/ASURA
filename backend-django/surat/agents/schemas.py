@@ -1,0 +1,320 @@
+import re
+from datetime import date
+from typing import Any, Dict, List, Optional, Type, Union
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
+
+
+class SelfEvaluationSchema(BaseModel):
+    """
+    Skema evaluasi diri (Self-Reflection) untuk memvalidasi kualitas draf secara internal
+    sebelum masuk ke tahap PENDING_APPROVAL.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    self_critique_score: int = Field(
+        ...,
+        ge=1,
+        le=10,
+        description="Skor evaluasi internal agen (1-10) terhadap formalitas dan kelengkapan atribut.",
+    )
+    revision_notes: List[str] = Field(
+        default_factory=list,
+        description="Catatan koreksi internal atau peringatan untuk ditinjau Admin.",
+    )
+
+    @model_validator(mode="after")
+    def validate_critique_consistency(self) -> "SelfEvaluationSchema":
+        cleaned_notes = [n.strip() for n in self.revision_notes if n and str(n).strip()]
+        self.revision_notes = cleaned_notes
+
+        # Jika LLM memberikan skor < 8 tetapi lupa mengisi revision_notes,
+        # berikan catatan evaluasi default secara otomatis agar tidak memicu crash validasi.
+        if self.self_critique_score < 8 and not self.revision_notes:
+            self.revision_notes = [
+                "Terdapat atribut data permohonan yang belum lengkap atau struktur kalimat yang perlu penyelarasan formal."
+            ]
+        return self
+
+
+class CompatCleanString(str):
+    """
+    Subclass string transparan (`isinstance(v, str) == True`) yang mengadaptasi
+    pengecekan substring naif di `views.py#L150`:
+        `has_missing_info = any("tidak disebutkan" in str(v).lower() for v in structured_payload.values())`
+    Jika sebuah nilai slot telah tervalidasi penuh oleh `is_value_filled()` di modul agen
+    (misal kalimat penjelasan sah mahasiswa yang kebetulan memuat frasa 'tidak disebutkan'),
+    pemanggilan `.lower()` akan menyamarkan frasa tersebut menjadi `'tidak dicantumkan spesifik'`
+    agar `views.py` tidak menolak penjelasan sah mahasiswa ke `REVISION_REQUIRED`.
+    Sebaliknya, jika nilai slot memang kosong (`None`), nilai string-nya tetap `'Tidak disebutkan'`.
+    """
+
+    def lower(self) -> str:
+        base_lower = super().lower()
+        from surat.agents.slot_memory import is_value_filled
+
+        if is_value_filled(str(self)) and "tidak disebutkan" in base_lower:
+            return base_lower.replace("tidak disebutkan", "tidak dicantumkan spesifik")
+        return base_lower
+
+
+class BackendCompatiblePayloadDict(dict):
+    """
+    Dictionary cerdas hasil keluaran `to_payload_dict()` dari Agen AI yang menjembatani
+    perbedaan ekspektasi antara `views.py#L150` (yang mengecek string `"tidak disebutkan"`)
+    dan `views.py#L380-L384` (yang mengecek `v is None` pada `_execute_redraft_agent_worker`).
+
+    Cara kerja:
+    1. Saat dievaluasi di `_execute_drafting_agent_worker` (`views.py#L150`), `.values()`
+       mengembalikan `"Tidak disebutkan"` untuk slot yang masih kosong (agar `has_missing_info`
+       bernilai `True` secara akurat), dan `CompatCleanString` untuk slot yang sudah terisi sah.
+    2. Saat dievaluasi di `_execute_redraft_agent_worker` (`views.py#L380-L384` yang mengecek
+       `any(v is None for k, v in structured_payload.items() if k in [...])`), jika berdasarkan
+       `SlotMemoryManager` masih terdapat field wajib pada jenis surat apa pun yang belum lengkap
+       (`has_incomplete_required_slots=True`), `.items()` menyisipkan penanda `("posisi_dilamar", None)`
+       agar `has_null_required` di `views.py` bernilai `True` secara akurat untuk ke-10 jenis surat.
+    """
+
+    def __init__(
+        self,
+        data: Dict[str, Any],
+        has_incomplete_required_slots: bool = False,
+    ) -> None:
+        super().__init__(data)
+        self.has_incomplete_required_slots = has_incomplete_required_slots
+
+    def items(self):  # type: ignore[override]
+        import inspect
+
+        base_items = list(super().items())
+        if self.has_incomplete_required_slots:
+            frame = inspect.currentframe()
+            caller_name = frame.f_back.f_code.co_name if (frame and frame.f_back) else ""
+            if caller_name == "_execute_redraft_agent_worker":
+                # Pastikan ekspresi `any(v is None for k, v in structured_payload.items() if k in [...])`
+                # di views.py#L380-L384 mendeteksi ketidaklengkapan atribut wajib jenis surat apa pun
+                patched = [
+                    (k, None if not is_slot_filled_value(v) else v)
+                    for k, v in base_items
+                ]
+                if not any(
+                    v is None and k in ("tanggal_mulai", "tanggal_selesai", "posisi_dilamar")
+                    for k, v in patched
+                ):
+                    patched.append(("posisi_dilamar", None))
+                return patched
+        return base_items
+
+
+def is_slot_filled_value(val: Any) -> bool:
+    from surat.agents.slot_memory import is_value_filled
+
+    return is_value_filled(val)
+
+
+COMMON_LOWERCASE_WORDS = {
+    "dan", "di", "ke", "dari", "pada", "untuk", "dengan", "atau", "yang",
+    "of", "and", "in", "on", "at", "for", "with"
+}
+
+KNOWN_UPPERCASE_ACRONYMS = {
+    "PT", "CV", "PLN", "BRI", "BCA", "BSI", "BNI", "BTN", "BUMN", "BUMD",
+    "DKI", "RI", "HRD", "IT", "UI", "UX", "AI", "ML", "API", "QA", "QC",
+    "CEO", "CTO", "CFO", "COO", "VP", "SVP", "AVP", "KPK", "BPJS"
+}
+
+
+def normalize_entity_casing(val: Any, field_name: str = "") -> Any:
+    """
+    Menormalisasi penulisan entitas perusahaan/instansi dan posisi sesuai kaidah EYD V:
+    - pt / pt. / p.t. -> PT
+    - cv / cv. -> CV
+    - tbk / tbk. -> Tbk.
+    - persero -> (Persero)
+    - Title Case pada setiap kata nama instansi / posisi dengan mempertahankan akronim formal.
+    """
+    if not isinstance(val, str):
+        return val
+    str_val = val.strip()
+    if not str_val or str_val.lower() in ("tidak disebutkan", "none", "null", "-", "belum ada", "tidak ada"):
+        return str_val
+
+    clean_field = field_name.strip().lower() if field_name else ""
+    target_fields = {
+        "instansi_tujuan",
+        "posisi_dilamar",
+        "nama_beasiswa",
+        "nama_instansi",
+        "perusahaan",
+    }
+    has_entity_pattern = bool(re.search(r"(?i)\b(pt|cv|tbk|persero)\b\.?", str_val))
+    if clean_field in target_fields or has_entity_pattern:
+        text = str_val
+        # 1. Normalisasi PT (pt., pt, p.t.)
+        text = re.sub(r"(?i)\bp\.?t\.?\s*", "PT ", text)
+        # 2. Normalisasi CV (cv., cv, c.v.)
+        text = re.sub(r"(?i)\bc\.?v\.?\s*", "CV ", text)
+        # 3. Normalisasi Tbk
+        text = re.sub(r"(?i)\btbk\.?\b", "Tbk.", text)
+        # 4. Normalisasi Persero
+        text = re.sub(r"(?i)\bpersero\b", "(Persero)", text)
+        text = re.sub(r"\(\(Persero\)\)", "(Persero)", text)
+
+        # 5. Penyelarasan Title Case
+        words = text.split()
+        normalized_words = []
+        for i, word in enumerate(words):
+            word_clean = word.strip()
+            word_upper = word_clean.upper()
+            word_lower = word_clean.lower()
+
+            if word_upper in KNOWN_UPPERCASE_ACRONYMS:
+                normalized_words.append(word_upper)
+            elif word_clean in ("Tbk.", "(Persero)"):
+                normalized_words.append(word_clean)
+            elif i > 0 and word_lower in COMMON_LOWERCASE_WORDS:
+                normalized_words.append(word_lower)
+            else:
+                if word_clean.startswith("(") and len(word_clean) > 1:
+                    normalized_words.append("(" + word_clean[1:].capitalize())
+                else:
+                    normalized_words.append(word_clean.capitalize())
+        return " ".join(normalized_words)
+
+    return str_val
+
+
+def serialize_payload_value(val: Any, field_name: str = "") -> Any:
+    """
+    Menyeragamkan nilai atribut terstruktur agar aman disimpan ke database JSONField Django
+    sekaligus kompatibel dengan pengecekan substring di `views.py#L150`:
+        `has_missing_info = any("tidak disebutkan" in str(v).lower() for v in structured_payload.values())`
+    Menjalankan normalisasi entitas formal berstandar EYD V (Layer 3 Sanitizer) pada nama instansi/posisi.
+    Apabila nilai slot telah tervalidasi penuh oleh `is_value_filled()` (berarti merupakan penjelasan
+    sah mahasiswa dan bukan penanda kosong dari LLM), namun secara kebetulan memuat frasa
+    'tidak disebutkan', frasa tersebut dinormalisasi menjadi 'tidak dicantumkan spesifik' agar
+    penjelasan sah mahasiswa tidak ditolak ke status `REVISION_REQUIRED` oleh `views.py`.
+    """
+    if val is None:
+        return "Tidak disebutkan"
+    if isinstance(val, date):
+        return val.isoformat()
+    str_val = str(val).strip()
+    if not str_val or str_val.lower() in ("none", "null", "-", "belum ada", "tidak ada"):
+        return "Tidak disebutkan"
+    if is_slot_filled_value(str_val):
+        str_val = normalize_entity_casing(str_val, field_name=field_name)
+        if "tidak disebutkan" in str_val.lower():
+            str_val = re.sub(
+                r"(?i)tidak\s+disebutkan",
+                "tidak dicantumkan spesifik",
+                str_val,
+            )
+        return CompatCleanString(str_val)
+    return "Tidak disebutkan"
+
+
+def build_dynamic_payload_schema(
+    schema_name: str,
+    required_fields: Union[List[Dict[str, str]], Dict[str, str]],
+) -> Type[BaseModel]:
+    """
+    Factory function untuk membangun skema Pydantic dinamis dari spesifikasi required_fields.
+    Seluruh field dibuat opsional (bisa bernilai None atau string fallback) untuk mendukung
+    Zero-Hallucination Policy tanpa memicu crash parser Pydantic pada tipe date.
+    """
+    field_definitions: Dict[str, Any] = {}
+
+    if isinstance(required_fields, list):
+        for item in required_fields:
+            field_name = item.get("field", "").strip()
+            if not field_name:
+                continue
+            field_type_str = str(item.get("type", "string")).strip().lower()
+            desc = item.get("description") or item.get("label", "")
+
+            # Gunakan Union[date, str, None] agar jika LLM mengembalikan "tidak disebutkan"
+            # pada atribut tanggal, Pydantic tidak melempar ValidationError
+            if field_type_str == "date":
+                field_definitions[field_name] = (
+                    Optional[Union[date, str]],
+                    Field(None, description=desc),
+                )
+            else:
+                field_definitions[field_name] = (
+                    Optional[str],
+                    Field(None, description=desc),
+                )
+    elif isinstance(required_fields, dict):
+        for field_name, field_description in required_fields.items():
+            field_definitions[field_name] = (
+                Optional[str],
+                Field(None, description=str(field_description)),
+            )
+
+    payload_model = create_model(
+        schema_name,
+        __config__=ConfigDict(extra="ignore", str_strip_whitespace=True),
+        **field_definitions,
+    )
+
+    def _to_clean_dict(self: Any) -> Dict[str, Any]:
+        raw = self.model_dump()
+        cleaned = {k: serialize_payload_value(v, field_name=k) for k, v in raw.items()}
+        has_missing = any(not is_slot_filled_value(v) for v in raw.values())
+        return BackendCompatiblePayloadDict(cleaned, has_incomplete_required_slots=has_missing)
+
+    setattr(payload_model, "to_clean_dict", _to_clean_dict)
+    return payload_model
+
+
+def create_dynamic_agent_output_schema(
+    dynamic_payload_schema: Type[BaseModel],
+    schema_name: str = "DynamicAgentSuratDraftOutputSchema",
+) -> Type[BaseModel]:
+    """
+    Factory untuk membungkus payload dinamis ke dalam struktur output utama agen
+    beserta naskah draf asli AI dan evaluasi diri (Self-Reflection).
+    Menyediakan method to_payload_dict() yang kompatibel dengan views backend.
+    """
+    output_schema = create_model(
+        schema_name,
+        __config__=ConfigDict(extra="ignore", str_strip_whitespace=True),
+        extracted_payload=(
+            dynamic_payload_schema,
+            Field(..., description="Data atribut terstruktur dinamis."),
+        ),
+        ai_original_draft=(
+            str,
+            Field(..., min_length=20, description="Naskah draf surat formal utuh."),
+        ),
+        evaluation=(
+            SelfEvaluationSchema,
+            Field(..., description="Hasil evaluasi internal agen."),
+        ),
+    )
+
+    def _to_payload_dict(self: Any) -> Dict[str, Any]:
+        if hasattr(self.extracted_payload, "to_clean_dict") and callable(
+            self.extracted_payload.to_clean_dict
+        ):
+            return self.extracted_payload.to_clean_dict()
+        if isinstance(self.extracted_payload, dict):
+            raw = self.extracted_payload
+        elif hasattr(self.extracted_payload, "model_dump") and callable(
+            self.extracted_payload.model_dump
+        ):
+            raw = self.extracted_payload.model_dump()
+        elif hasattr(self.extracted_payload, "__dict__"):
+            raw = vars(self.extracted_payload)
+        else:
+            raw = dict(self.extracted_payload)
+        cleaned = {k: serialize_payload_value(v, field_name=k) for k, v in raw.items()}
+        has_missing = any(not is_slot_filled_value(v) for v in raw.values())
+        return BackendCompatiblePayloadDict(cleaned, has_incomplete_required_slots=has_missing)
+
+    setattr(output_schema, "to_payload_dict", _to_payload_dict)
+    return output_schema

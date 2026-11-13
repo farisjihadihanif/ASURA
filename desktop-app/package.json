@@ -1,0 +1,34 @@
+{
+  "name": "asura-desktop",
+  "version": "1.0.0",
+  "description": "ASURA - Asisten Surat Resmi Mahasiswa untuk Desktop Windows",
+  "main": "main.js",
+  "author": "ASURA Team",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "lint": "node --check main.js && node --check preload.js && node --check renderer.js",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "id.ac.uinsuka.asura",
+    "productName": "ASURA",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "styles.css",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "artifactName": "ASURA-Portable.exe"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+﻿<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASURA</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app">
+    <button id="mascot-btn" class="mascot-btn" type="button" aria-label="Minta ASURA">
+      <span class="mascot-pill">Minta ASURA</span>
+      <img src="assets/asura-mascot.png" alt="ASURA" />
+    </button>
+    <section id="popup-panel" class="popup-panel" hidden>
+      <header class="popup-header">
+        <div class="brand-row">
+          <img src="assets/asura-mascot.png" alt="ASURA" class="brand-avatar" />
+          <div>
+            <div class="brand-title">ASURA</div>
+            <div class="brand-sub">Asisten Surat Resmi Mahasiswa</div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="btn-history" class="hdr-btn" type="button" title="Riwayat Chat" hidden>Riwayat</button>
+          <button id="btn-new-chat" class="hdr-btn" type="button" title="Chat Baru" hidden>+</button>
+          <button id="btn-logout" class="hdr-btn" type="button" title="Logout" hidden>Keluar</button>
+          <button id="btn-close" class="close-btn" type="button" aria-label="Tutup">×</button>
+        </div>
+      </header>
+      <div id="view-login" class="view-login">
+        <p class="login-desc">
+          Masuk dengan akun <strong>Mahasiswa</strong> untuk meminta pembuatan surat ke ASURA. Sesi login akan tersimpan selamanya sampai Anda menekan Keluar.
+        </p>
+        <form id="login-form" class="login-form">
+          <label for="input-nim">NIM Mahasiswa</label>
+          <input id="input-nim" type="text" placeholder="Contoh: INF24001" required />
+          <label for="input-pass">Kata Sandi</label>
+          <input id="input-pass" type="password" placeholder="Masukkan kata sandi" required />
+          <p id="login-error" class="error-text" hidden></p>
+          <button id="btn-login-submit" type="submit" class="btn-primary">Masuk ke ASURA</button>
+          <button id="btn-fill-demo" type="button" class="btn-link">Isi Akun Demo (INF24001)</button>
+        </form>
+      </div>
+      <div id="view-chat" class="view-chat" hidden>
+        <div id="user-banner" class="user-banner"></div>
+        <div id="history-drawer" class="history-drawer" hidden>
+          <div class="history-title">Riwayat Percakapan</div>
+          <div id="history-list" class="history-list"></div>
+        </div>
+        <div id="messages-box" class="messages-box"></div>
+        <div id="action-bar" class="action-bar"></div>
+        <form id="chat-form" class="chat-composer">
+          <textarea id="chat-input" rows="2" placeholder="Ketik pesan..." required></textarea>
+          <button id="btn-send" type="submit" class="send-btn" aria-label="Kirim">↑</button>
+        </form>
+      </div>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>
