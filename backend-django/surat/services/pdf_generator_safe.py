@@ -1,57 +1,47 @@
+import io
 import os
 import re
-import shutil
-import tempfile
 from typing import Dict, Any
 from django.conf import settings
 from django.utils import timezone
-def _build_pure_python_pdf(lines: list[str]) -> bytes:
-    """Membuat berkas PDF 1.4 A4 resmi secara mandiri tanpa dependensi eksternal."""
-    def esc(s: str) -> str:
-        safe = s.encode("latin-1", "replace").decode("latin-1")
-        return safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    content_ops = ["BT", "/F1 11 Tf", "55 785 Td", "15 TL"]
-    for idx, line in enumerate(lines[:46]):
-        if idx == 0:
-            content_ops.append(f"/F2 12 Tf ({esc(line)}) Tj /F1 11 Tf")
-        else:
-            content_ops.append(f"T* ({esc(line)}) Tj")
-    content_ops.append("ET")
-    stream_bytes = "\n".join(content_ops).encode("latin-1", "replace")
-    objs = [
-        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>\nendobj\n",
-        f"4 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode("ascii") + stream_bytes + b"\nendstream\nendobj\n",
-        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>\nendobj\n",
-        b"6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold >>\nendobj\n",
+from .signature_storage import (
+    resolve_signature_path_and_uri,
+    humanize_jabatan,
+    clean_fakultas_name,
+)
+def clean_letter_body_text(raw_isi: str) -> str:
+    text = str(raw_isi or "").replace("`", "").strip()
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text).replace("*", "")
+    # Hapus kalimat basa-basi klise AI (AI slop)
+    slop_patterns = [
+        r"Mahasiswa yang bersangkutan senantiasa menunjukkan iktikad baik[^.]*\.",
+        r"Yang bersangkutan merupakan mahasiswa yang berkelakuan baik dan mematuhi[^.]*\.",
+        r"Surat keterangan ini diberikan kepada mahasiswa bersangkutan untuk dipergunakan sebagai Mahasiswa Aktif serta melengkapi berkas administrasi yang dipersyaratkan\.",
     ]
-    pdf = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for obj in objs:
-        offsets.append(len(pdf))
-        pdf.extend(obj)
-    xref_pos = len(pdf)
-    pdf.extend(f"xref\n0 {len(objs) + 1}\n".encode("ascii"))
-    pdf.extend(b"0000000000 65535 f \n")
-    for off in offsets[1:]:
-        pdf.extend(f"{off:010d} 00000 n \n".encode("ascii"))
-    pdf.extend(
-        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("ascii")
-    )
-    return bytes(pdf)
+    for pat in slop_patterns:
+        text = re.sub(pat, "", text, flags=re.IGNORECASE)
+    # Pisahkan per paragraf dan buang paragraf penutup ganda dari LLM
+    cleaned_paras = []
+    for para in text.splitlines():
+        p = re.sub(r"\s{2,}", " ", para).strip()
+        if not p:
+            continue
+        if re.match(r"^(Demikianlah?\s+surat|Atas\s+perhatian\s+dan\s+kerja\s*samanya)", p, flags=re.IGNORECASE):
+            continue
+        cleaned_paras.append(p)
+    return "\n".join(cleaned_paras).strip()
 def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
     nomor_surat = str(context_data.get("nomor_surat") or "-")
     nama_mhs = str(context_data.get("nama_mahasiswa") or "-")
     nim_mhs = str(context_data.get("nim") or "-")
     prodi_mhs = str(context_data.get("program_studi") or "-")
-    fakultas_mhs = str(context_data.get("fakultas") or "Sains dan Teknologi")
+    fakultas_clean = clean_fakultas_name(context_data.get("fakultas") or "Sains dan Teknologi")
     semester_mhs = str(context_data.get("semester_aktif") or "-")
     tahun_akademik = str(context_data.get("tahun_akademik") or "-")
     raw_isi = str(context_data.get("final_approved_content") or context_data.get("isi_surat") or "")
-    isi_clean = re.sub(r"\*\*(.*?)\*\*", r"\1", raw_isi).replace("*", "").replace("`", "")
-    isi_html = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", raw_isi).replace("*", "")
+    isi_clean = clean_letter_body_text(raw_isi)
     payload = context_data.get("payload") or {}
+    surat_id = context_data.get("id") or context_data.get("surat_request_id")
     nama_surat = str(
         payload.get("judul_surat")
         or context_data.get("nama_surat")
@@ -59,15 +49,47 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
     )
     tanggal_surat = str(context_data.get("tanggal_surat") or timezone.now().strftime("%d %B %Y"))
     kota_surat = str(context_data.get("kota_surat") or os.environ.get("UNIVERSITY_CITY", "Yogyakarta"))
-    jabatan_pejabat = str(context_data.get("jabatan_penandatangan") or f"Dekan Fakultas {fakultas_mhs}")
-    nama_pejabat = str(context_data.get("nama_penandatangan") or "Dr. Joel Evans, M.T.")
-    nip_pejabat = str(context_data.get("nip_penandatangan") or "198001012005011001")
+    raw_jabatan = (
+        payload.get("_signer_jabatan")
+        or context_data.get("jabatan_penandatangan")
+        or f"Dekan Fakultas {fakultas_clean}"
+    )
+    jabatan_pejabat = humanize_jabatan(raw_jabatan, fakultas_clean)
+    nama_pejabat = str(
+        payload.get("_signer_nama")
+        or context_data.get("nama_penandatangan")
+        or "Dr. Joel Evans, M.T."
+    )
+    nip_pejabat = str(
+        payload.get("_signer_nip")
+        or context_data.get("nip_penandatangan")
+        or "198001012005011001"
+    )
     qr_url = str(context_data.get("qr_verification_code") or context_data.get("qr_code_url") or nomor_surat)
+    sig_local_path, sig_data_uri = resolve_signature_path_and_uri(
+        surat_id=surat_id,
+        lecturer=context_data.get("lecturer"),
+        context_data={**payload, **context_data},
+    )
+    if sig_local_path and os.path.exists(sig_local_path):
+        sig_block_html = (
+            f"<div style='margin: 6px 0 4px 0;'>"
+            f"<img src='{sig_local_path}' style='height: 92px; max-width: 230px; width: auto;' />"
+            f"</div>"
+        )
+    elif sig_data_uri:
+        sig_block_html = (
+            f"<div style='margin: 6px 0 4px 0;'>"
+            f"<img src='{sig_data_uri}' style='height: 92px; max-width: 230px; width: auto;' />"
+            f"</div>"
+        )
+    else:
+        sig_block_html = "<br/><br/><br/><br/>"
     paragraphs_html = "".join(
-        f"<p style='text-align: justify; margin: 0 0 10px 0;'>{p.strip()}</p>"
-        for p in isi_html.splitlines()
+        f"<p style='text-align: justify; margin: 0 0 10px 0; line-height: 1.55;'>{p.strip()}</p>"
+        for p in isi_clean.splitlines()
         if p.strip()
-    ) or f"<p>{isi_html}</p>"
+    ) or f"<p style='text-align: justify; line-height: 1.55;'>{isi_clean}</p>"
     html_doc = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
@@ -75,7 +97,7 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
   <div style="text-align: center; border-bottom: 2px solid #000000; padding-bottom: 8px; margin-bottom: 14px;">
     <div style="font-size: 12pt; font-weight: bold;">KEMENTERIAN AGAMA REPUBLIK INDONESIA</div>
     <div style="font-size: 13pt; font-weight: bold;">UNIVERSITAS ISLAM NEGERI SUNAN KALIJAGA</div>
-    <div style="font-size: 12pt; font-weight: bold;">FAKULTAS {fakultas_mhs.upper()}</div>
+    <div style="font-size: 12pt; font-weight: bold;">FAKULTAS {fakultas_clean.upper()}</div>
     <div style="font-size: 9pt;">Jl. Marsda Adisucipto Yogyakarta 55281 | www.uin-suka.ac.id</div>
   </div>
   <div style="text-align: center; margin: 12px 0 16px 0;">
@@ -93,7 +115,7 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
     <tr><td style="width: 150px;">Nama Mahasiswa</td><td>: <b>{nama_mhs}</b></td></tr>
     <tr><td>NIM</td><td>: {nim_mhs}</td></tr>
     <tr><td>Program Studi</td><td>: {prodi_mhs}</td></tr>
-    <tr><td>Fakultas</td><td>: {fakultas_mhs}</td></tr>
+    <tr><td>Fakultas</td><td>: {fakultas_clean}</td></tr>
     <tr><td>Semester / T.A.</td><td>: {semester_mhs} / {tahun_akademik}</td></tr>
   </table>
   <div>{paragraphs_html}</div>
@@ -101,13 +123,14 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
   <br/>
   <table style="width: 100%;">
     <tr>
-      <td style="width: 50%; font-size: 8.5pt; color: #333333;">
+      <td style="width: 50%; font-size: 8.5pt; color: #333333; vertical-align: bottom;">
         <b>TERVERIFIKASI ELEKTRONIK (ASURA)</b><br/>
         Kode Verifikasi: {qr_url}
       </td>
-      <td style="width: 50%;">
+      <td style="width: 50%; vertical-align: top;">
         {kota_surat}, {tanggal_surat}<br/>
-        {jabatan_pejabat},<br/><br/><br/>
+        {jabatan_pejabat},
+        {sig_block_html}
         <b><u>{nama_pejabat}</u></b><br/>
         NIP. {nip_pejabat}
       </td>
@@ -115,49 +138,15 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
   </table>
 </body>
 </html>"""
-    pdf_bytes = None
-    try:
-        from xhtml2pdf import pisa
-        import io
-        buf = io.BytesIO()
-        res = pisa.CreatePDF(html_doc, dest=buf, encoding="utf-8")
-        if not res.err and buf.getvalue():
-            pdf_bytes = buf.getvalue()
-    except Exception:
-        pdf_bytes = None
-    if not pdf_bytes:
-        import textwrap
-        plain_lines = [
-            "KEMENTERIAN AGAMA RI - UIN SUNAN KALIJAGA YOGYAKARTA",
-            f"FAKULTAS {fakultas_mhs.upper()}",
-            "-" * 74,
-            f"{nama_surat.upper()} (Nomor: {nomor_surat})",
-            "",
-            f"Penandatangan : {nama_pejabat} (NIP. {nip_pejabat})",
-            f"Jabatan       : {jabatan_pejabat}",
-            "",
-            f"Nama Mahasiswa: {nama_mhs}",
-            f"NIM           : {nim_mhs}",
-            f"Program Studi : {prodi_mhs}",
-            f"Semester/T.A. : {semester_mhs} / {tahun_akademik}",
-            "",
-        ]
-        for para in isi_clean.splitlines():
-            if para.strip():
-                plain_lines.extend(textwrap.wrap(para.strip(), width=78))
-                plain_lines.append("")
-        plain_lines.extend([
-            "Demikian surat ini dibuat untuk dipergunakan sebagaimana mestinya.",
-            "",
-            f"{kota_surat}, {tanggal_surat}",
-            f"{nama_pejabat} (NIP. {nip_pejabat})",
-            f"Verifikasi ASURA: {qr_url}",
-        ])
-        pdf_bytes = _build_pure_python_pdf(plain_lines)
+    from xhtml2pdf import pisa
+    buf = io.BytesIO()
+    res = pisa.CreatePDF(html_doc, dest=buf, encoding="utf-8")
+    if res.err or not buf.getvalue():
+        raise RuntimeError(f"xhtml2pdf gagal merender PDF (err={res.err})")
+    pdf_bytes = buf.getvalue()
     pdf_dir = os.path.join(settings.BASE_DIR, "media", "generated_pdf")
     os.makedirs(pdf_dir, exist_ok=True)
     nomor_clean = nomor_surat.replace("/", "_")
-    surat_id = context_data.get("id") or context_data.get("surat_request_id")
     named_path = os.path.join(pdf_dir, f"surat_{nomor_clean}.pdf")
     with open(named_path, "wb") as f_out:
         f_out.write(pdf_bytes)

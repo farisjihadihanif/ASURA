@@ -64,7 +64,7 @@ export const suratService = {
   async fetchPdfBlobUrl(requestId: number): Promise<string> {
     const res = await api.get<{ pdf_base64: string; filename?: string }>(
       `/api/surat/requests/${requestId}/preview-pdf/`,
-      { params: { format: 'base64' } }
+      { params: { encoding: 'base64' } }
     );
     const b64 = res.data?.pdf_base64 || '';
     const binaryStr = window.atob(b64);
@@ -138,4 +138,5 @@ export const suratService = {
   },
 };
 export default suratService;
+
 

@@ -4,8 +4,6 @@ from .views import (
     SuratRequestCreateAPIView,
     SuratRequestListAPIView,
     SuratRequestDetailAPIView,
-    SuratPreviewPdfAPIView,
-    SuratDownloadPdfAPIView,
     LecturerApprovalActionAPIView,
     SuratVerifyAPIView,
     SuratRequestRedraftAPIView,
@@ -17,6 +15,12 @@ from .views import (
     NotificationReadAPIView,
     NotificationReadAllAPIView,
 )
+from .views_extra import (
+    SuratPreviewPdfAPIView,
+    SuratDownloadPdfAPIView,
+    SuratMarkPrintedAPIView,
+    SuratDeliverEmailAPIView,
+)
 urlpatterns = [
     path('types/', SuratTypeListAPIView.as_view(), name='surat-type-list'),
     path('request/', SuratRequestCreateAPIView.as_view(), name='surat-request-create'),
@@ -24,6 +28,8 @@ urlpatterns = [
     path('requests/<int:pk>/', SuratRequestDetailAPIView.as_view(), name='surat-request-detail'),
     path('requests/<int:pk>/preview-pdf/', SuratPreviewPdfAPIView.as_view(), name='surat-preview-pdf'),
     path('requests/<int:pk>/download-pdf/', SuratDownloadPdfAPIView.as_view(), name='surat-download-pdf'),
+    path('requests/<int:pk>/mark-printed/', SuratMarkPrintedAPIView.as_view(), name='surat-mark-printed'),
+    path('requests/<int:pk>/deliver-email/', SuratDeliverEmailAPIView.as_view(), name='surat-deliver-email'),
     path('approval/<int:approval_id>/action/', LecturerApprovalActionAPIView.as_view(), name='surat-approval-action'),
     path('verify/<str:token>/', SuratVerifyAPIView.as_view(), name='surat-verify'),
     path('requests/<int:pk>/re-draft/', SuratRequestRedraftAPIView.as_view(), name='surat-request-redraft'),

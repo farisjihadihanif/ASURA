@@ -18,6 +18,38 @@ interface SuratActionCardProps {
   onUpdated: () => Promise<void>;
   onPreviewPdf: (requestId: number) => void;
 }
+async function dispatchPrintViaAgentOrBrowser(requestId: number): Promise<string> {
+  try {
+    const res = await fetch('http://127.0.0.1:38911/print', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return `Dokumen dicetak otomatis ke printer (${data.deviceName || 'Printer Default'}) oleh ASURA Agent.`;
+    }
+  } catch {
+    // Fallback jika ASURA Desktop Agent sedang tidak berjalan
+  }
+  const blobUrl = await suratService.fetchPdfBlobUrl(requestId);
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '1px';
+  iframe.style.height = '1px';
+  iframe.style.opacity = '0';
+  iframe.src = blobUrl;
+  iframe.onload = () => {
+    window.setTimeout(() => {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    }, 300);
+  };
+  document.body.appendChild(iframe);
+  return 'Menyiapkan pencetakan dokumen ke printer...';
+}
 export const SuratActionCard: React.FC<SuratActionCardProps> = ({
   suratRequest,
   defaultEmail = '',
@@ -52,26 +84,11 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
     setFeedback(null);
     try {
       await suratService.markSuratPrinted(suratRequest.id);
-      const blobUrl = await suratService.fetchPdfBlobUrl(suratRequest.id);
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'fixed';
-      iframe.style.right = '0';
-      iframe.style.bottom = '0';
-      iframe.style.width = '1px';
-      iframe.style.height = '1px';
-      iframe.style.opacity = '0';
-      iframe.src = blobUrl;
-      iframe.onload = () => {
-        window.setTimeout(() => {
-          iframe.contentWindow?.focus();
-          iframe.contentWindow?.print();
-        }, 300);
-      };
-      document.body.appendChild(iframe);
-      setFeedback({ type: 'ok', text: 'Dialog cetak printer dibuka.' });
+      const msg = await dispatchPrintViaAgentOrBrowser(suratRequest.id);
+      setFeedback({ type: 'ok', text: msg });
       await onUpdated();
     } catch (err) {
-      setFeedback({ type: 'err', text: extractErrorMessage(err, 'Gagal menyiapkan pencetakan.') });
+      setFeedback({ type: 'err', text: extractErrorMessage(err, 'Gagal mencetak surat ke printer.') });
     } finally {
       setBusyAction(null);
     }

@@ -1,4 +1,5 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
+﻿import RichMessageText from '../components/RichMessageText';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Send,
@@ -347,7 +348,7 @@ export const StudentChatPage: React.FC = () => {
                   return (
                     <div key={msg.id} className="flex justify-end">
                       <div className="max-w-[80%] sm:max-w-[72%] rounded-2xl rounded-br-sm px-4 py-3 bg-[#f3ebe4] text-[#27211e] text-xs sm:text-sm leading-relaxed whitespace-pre-wrap">
-                        {msg.text}
+                        <RichMessageText text={msg.text} isUser={msg.sender === 'user'} />
                       </div>
                     </div>
                   );
@@ -358,7 +359,7 @@ export const StudentChatPage: React.FC = () => {
                       <Sparkles className="w-3.5 h-3.5 text-[#d76b3e]" />
                     </div>
                     <div className="max-w-[85%] text-[#27211e] text-xs sm:text-sm leading-relaxed whitespace-pre-wrap pt-1">
-                      {msg.text}
+                      <RichMessageText text={msg.text} isUser={msg.sender === 'user'} />
                     </div>
                   </div>
                 );
@@ -510,5 +511,6 @@ export const StudentChatPage: React.FC = () => {
   );
 };
 export default StudentChatPage;
+
 
 

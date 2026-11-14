@@ -91,7 +91,7 @@ def verify_internship_semester_and_credits(student_data, minimum_sks=60):
         return False, f"Pengajuan ditolak: Semester aktif ({semester_aktif}) belum memenuhi syarat minimum (Semester 5)."
     
     if total_sks_lulus < minimum_sks:
-        return False, f"Pengajuan ditolak: Total SKS lulus ({total_sks_lulus}) belummencapai syarat minimum ({minimum_sks} SKS)."
+        return False, f"Pengajuan ditolak: Total SKS lulus ({total_sks_lulus}) belum mencapai syarat minimum ({minimum_sks} SKS)."
 
     return True, "Syarat semester dan SKS magang terpenuhi."
 

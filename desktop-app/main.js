@@ -1,14 +1,15 @@
 ﻿const { app, BrowserWindow, ipcMain, nativeImage, screen, shell, Tray, Menu, Notification } = require('electron');
 const path = require('node:path');
-const os = require('node:os');
 const fs = require('node:fs');
-const fsp = require('node:fs/promises');
+const http = require('node:http');
 app.disableHardwareAcceleration();
 let mainWindow;
 let tray;
+let localBridgeServer;
 let isExpanded = false;
 const API_BASE_URL = (process.env.ASURA_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 const SESSION_FILE = path.join(app.getPath('userData'), 'asura-session.json');
+const PRINT_BRIDGE_PORT = 38911;
 function readSession() {
   try {
     if (fs.existsSync(SESSION_FILE)) {
@@ -35,12 +36,6 @@ function extractApiError(payload, fallback) {
   if (typeof payload.detail === 'string') return payload.detail;
   if (typeof payload.message === 'string') return payload.message;
   if (typeof payload.error === 'string') return payload.error;
-  if (payload.errors && typeof payload.errors === 'object') {
-    const firstKey = Object.keys(payload.errors)[0];
-    const val = payload.errors[firstKey];
-    if (Array.isArray(val) && val[0]) return `${firstKey}: ${val[0]}`;
-    if (typeof val === 'string') return `${firstKey}: ${val}`;
-  }
   return fallback;
 }
 async function callBackend({ method = 'GET', endpoint, path: reqPath, body }) {
@@ -152,53 +147,126 @@ async function createWindow() {
     mainWindow.focus();
   });
 }
+async function resolveTargetPrinter(preferredDeviceName = '') {
+  if (!mainWindow) return { name: preferredDeviceName || '', isVirtual: false };
+  const printers = await mainWindow.webContents.getPrintersAsync();
+  if (!Array.isArray(printers) || printers.length === 0) {
+    return { name: preferredDeviceName || '', isVirtual: false };
+  }
+  const isVirtualName = (n) => /pdf|xps|onenote|fax|webex/i.test(n || '');
+  if (preferredDeviceName) {
+    const exact = printers.find((p) => p.name === preferredDeviceName);
+    if (exact) return { name: exact.name, isVirtual: isVirtualName(exact.name) };
+  }
+  // Prioritas 1: Printer fisik default
+  const physicalDefault = printers.find((p) => p.isDefault && !isVirtualName(p.name));
+  if (physicalDefault) return { name: physicalDefault.name, isVirtual: false };
+  // Prioritas 2: Printer fisik mana pun yang tersedia
+  const anyPhysical = printers.find((p) => !isVirtualName(p.name));
+  if (anyPhysical) return { name: anyPhysical.name, isVirtual: false };
+  // Prioritas 3 (jika hanya printer virtual di sistem): hindari Adobe PDF yang bermasalah pada Chromium
+  const msPdf = printers.find((p) => /microsoft print to pdf/i.test(p.name));
+  if (msPdf) return { name: msPdf.name, isVirtual: true };
+  const safeFallback = printers.find((p) => !/adobe pdf/i.test(p.name)) || printers[0];
+  return { name: safeFallback.name, isVirtual: isVirtualName(safeFallback.name) };
+}
 async function printPdfDirectToPrinter(requestId, deviceName = '') {
   const res = await callBackend({
     method: 'GET',
-    endpoint: `/api/surat/requests/${requestId}/preview-pdf/?format=base64`,
+    endpoint: `/api/surat/requests/${requestId}/preview-pdf/?encoding=base64`,
   });
-  if (!res || !res.pdf_base64) {
-    throw new Error('Dokumen PDF surat belum tersedia untuk dicetak.');
+  if (!res || (!res.print_html && !res.pdf_base64)) {
+    throw new Error('Dokumen surat belum tersedia untuk dicetak.');
   }
-  const tempPdfPath = path.join(os.tmpdir(), `asura_print_${requestId}_${Date.now()}.pdf`);
-  await fsp.writeFile(tempPdfPath, Buffer.from(res.pdf_base64, 'base64'));
+  const targetPrinter = await resolveTargetPrinter(deviceName);
+  const printableHtml = res.print_html || `<!doctype html><html><body style="font-family:serif;padding:40px;"><h2>Dokumen Resmi ASURA</h2><p>ID Surat: ${requestId}</p></body></html>`;
   const printWin = new BrowserWindow({
+    width: 794,
+    height: 1123,
     show: false,
     webPreferences: {
-      plugins: true,
-      paintWhenInitiallyHidden: true,
       contextIsolation: true,
       nodeIntegration: false,
+      paintWhenInitiallyHidden: true,
     },
   });
   try {
-    await printWin.loadFile(tempPdfPath);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(printableHtml)}`);
+    await new Promise((resolve) => setTimeout(resolve, 400));
     await new Promise((resolve, reject) => {
       const printOpts = {
-        silent: Boolean(deviceName),
+        silent: true,
         printBackground: true,
+        pageSize: 'A4',
       };
-      if (deviceName) {
-        printOpts.deviceName = deviceName;
+      if (targetPrinter.name) {
+        printOpts.deviceName = targetPrinter.name;
       }
       printWin.webContents.print(printOpts, (success, failureReason) => {
         if (!success && failureReason && failureReason !== 'cancelled') {
-          reject(new Error(`Gagal mencetak ke printer: ${failureReason}`));
+          reject(new Error(`Gagal mencetak ke printer (${targetPrinter.name || 'Default'}): ${failureReason}`));
         } else {
           resolve(success);
         }
       });
     });
-    return { printed: true, deviceName: deviceName || 'Dialog Printer Windows' };
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'ASURA Print Agent',
+        body: `Dokumen resmi dicetak ke ${targetPrinter.name || 'Printer Default'}.`,
+      }).show();
+    }
+    return { printed: true, deviceName: targetPrinter.name || 'Printer Default' };
   } finally {
     if (!printWin.isDestroyed()) {
       printWin.close();
     }
-    setTimeout(() => {
-      fsp.unlink(tempPdfPath).catch(() => {});
-    }, 5000);
   }
+}
+function startLocalPrintBridge() {
+  localBridgeServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, agent: 'ASURA Print Bridge' }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/print') {
+      let bodyStr = '';
+      req.on('data', (chunk) => { bodyStr += chunk; });
+      req.on('end', async () => {
+        try {
+          const payload = bodyStr ? JSON.parse(bodyStr) : {};
+          const requestId = Number(payload.requestId);
+          if (!requestId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'requestId wajib diisi.' }));
+            return;
+          }
+          const result = await printPdfDirectToPrinter(requestId, payload.deviceName || '');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message || 'Gagal mencetak dokumen.' }));
+        }
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  localBridgeServer.on('error', (err) => {
+    console.warn('[ASURA] Local print bridge port warning:', err.message);
+  });
+  localBridgeServer.listen(PRINT_BRIDGE_PORT, '127.0.0.1');
 }
 function registerIpc() {
   ipcMain.handle('window:set-mode', (event, expanded) => { assertTrustedSender(event); resizeWidget(Boolean(expanded)); });
@@ -284,10 +352,8 @@ else {
   app.on('second-instance', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     registerIpc();
+    startLocalPrintBridge();
     createTray();
     await createWindow();
   });
 }
-
-
-
