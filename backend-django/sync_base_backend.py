@@ -6,8 +6,7 @@ from pathlib import Path
 DST_BACKEND = Path(__file__).resolve().parent
 
 SEARCH_BASES = [
-    Path(r"D:\coolyeah\Semester 7\perancangan komputasi interaktif\project\auto-surat-backend\backend-django"),
-    Path(r"D:\coolyeah\Semester 7\Perancangan Komputasi Interaktif\auto-surat-backend\backend-django"),
+    Path(p) for p in os.environ.get("ASURA_BASE_BACKEND", "").split(os.pathsep) if p
 ]
 
 
@@ -15,16 +14,9 @@ def find_source_backend() -> Path:
     for candidate in SEARCH_BASES:
         if (candidate / "manage.py").exists() and (candidate / "accounts").exists():
             return candidate
-    coolyeah = Path(r"D:\coolyeah")
-    if coolyeah.exists():
-        for root, dirs, files in os.walk(coolyeah):
-            p = Path(root)
-            if "ASURA" in p.parts or "node_modules" in p.parts or ".venv" in p.parts:
-                dirs[:] = []
-                continue
-            if "manage.py" in files and (p / "accounts").exists() and (p / "core").exists():
-                return p
-    raise FileNotFoundError("Folder sumber backend-django tidak ditemukan di D:\\coolyeah.")
+    raise FileNotFoundError(
+        "Folder sumber backend-django tidak ditemukan. Set env ASURA_BASE_BACKEND ke path folder backend-django sumber."
+    )
 
 
 def patch_copied_chat_workflow():

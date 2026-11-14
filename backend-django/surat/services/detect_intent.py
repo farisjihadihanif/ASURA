@@ -11,6 +11,7 @@ STOP_WORDS = {
     "keterangan", "izin", "ijin", "pengantar", "rekomendasi",
 }
 EXPLICIT_PHRASE_MAPPINGS = [
+    (r'\b(ukt|uang\s+kuliah\s+tunggal)\b', 'SK-UKT'),
     (r'\b(masih\s+kuliah|aktif\s+kuliah|kuliah\s+aktif)\b', 'SK-MK'),
     (r'\b(berkelakuan\s+baik)\b', 'SK-BB'),
     (r'\b(habis\s+teori)\b', 'SK-HT'),

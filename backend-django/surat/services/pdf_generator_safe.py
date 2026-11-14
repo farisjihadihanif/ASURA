@@ -9,10 +9,32 @@ from .signature_storage import (
     humanize_jabatan,
     clean_fakultas_name,
 )
-def clean_letter_body_text(raw_isi: str) -> str:
+from .custom_letter_ai import generate_custom_letter_body, _strip_redundant_header_footer
+def _build_qr_img_html(url: str) -> str:
+    """QR code verifikasi sebagai gambar base64 (tanpa teks URL panjang yang menabrak/membekukan layout)."""
+    try:
+        import base64
+        import io as _io
+        import qrcode
+
+        qr = qrcode.QRCode(box_size=6, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr.add_data(url)
+        qr.make(fit=True)
+        buf = _io.BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+        data = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"<img src='data:image/png;base64,{data}' style='width: 92px; height: 92px;' />"
+    except Exception:
+        return ""
+
+
+def clean_letter_body_text(raw_isi: str, is_custom: bool = False) -> str:
     text = str(raw_isi or "").replace("`", "").strip()
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text).replace("*", "")
-    # Hapus kalimat basa-basi klise AI (AI slop)
+    if is_custom:
+        text = _strip_redundant_header_footer(text)
+        cleaned_paras = [re.sub(r"\s{2,}", " ", p).strip() for p in text.splitlines() if p.strip()]
+        return "\n".join(cleaned_paras).strip()
     slop_patterns = [
         r"Mahasiswa yang bersangkutan senantiasa menunjukkan iktikad baik[^.]*\.",
         r"Yang bersangkutan merupakan mahasiswa yang berkelakuan baik dan mematuhi[^.]*\.",
@@ -20,7 +42,6 @@ def clean_letter_body_text(raw_isi: str) -> str:
     ]
     for pat in slop_patterns:
         text = re.sub(pat, "", text, flags=re.IGNORECASE)
-    # Pisahkan per paragraf dan buang paragraf penutup ganda dari LLM
     cleaned_paras = []
     for para in text.splitlines():
         p = re.sub(r"\s{2,}", " ", para).strip()
@@ -35,40 +56,70 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
     nama_mhs = str(context_data.get("nama_mahasiswa") or "-")
     nim_mhs = str(context_data.get("nim") or "-")
     prodi_mhs = str(context_data.get("program_studi") or "-")
-    fakultas_clean = clean_fakultas_name(context_data.get("fakultas") or "Sains dan Teknologi")
+    fakultas_clean = clean_fakultas_name(context_data.get("fakultas") or "Teknik")
     semester_mhs = str(context_data.get("semester_aktif") or "-")
     tahun_akademik = str(context_data.get("tahun_akademik") or "-")
     raw_isi = str(context_data.get("final_approved_content") or context_data.get("isi_surat") or "")
-    isi_clean = clean_letter_body_text(raw_isi)
     payload = context_data.get("payload") or {}
     surat_id = context_data.get("id") or context_data.get("surat_request_id")
-    nama_surat = str(
-        payload.get("judul_surat")
-        or context_data.get("nama_surat")
-        or "SURAT KETERANGAN RESMI"
+    kode_surat = str(context_data.get("kode_surat") or payload.get("kode_surat") or "").upper()
+    is_custom = bool(
+        context_data.get("is_custom_personal")
+        or payload.get("_is_custom_personal")
+        or kode_surat.startswith("CUSTOM")
     )
-    tanggal_surat = str(context_data.get("tanggal_surat") or timezone.now().strftime("%d %B %Y"))
+    is_sakit = kode_surat == "CUSTOM-SAKIT" or "sakit" in str(context_data.get("nama_surat") or "").lower()
+    isi_clean = clean_letter_body_text(raw_isi, is_custom=is_custom)
+    if is_custom and (
+        not isi_clean
+        or "fakultas teknik universitas yang bersangkutan" in isi_clean.lower()
+        or "mahasiswa bersangkutan" in isi_clean.lower()
+        or "kelengkapan administratif" in isi_clean.lower()
+    ):
+        class _DummyStu:
+            nim = nim_mhs
+            class user:
+                nama = nama_mhs
+            class prodi:
+                nama_prodi = prodi_mhs
+        isi_clean = clean_letter_body_text(
+            generate_custom_letter_body(
+                _DummyStu(),
+                payload_data=payload,
+                user_prompt_context=str(context_data.get("nama_surat") or ""),
+                kode_surat="CUSTOM-SAKIT" if is_sakit else "CUSTOM-UMUM",
+            ),
+            is_custom=True,
+        )
+    if is_custom:
+        from .custom_letter_ai import derive_custom_title
+
+        nama_surat = derive_custom_title(
+            payload,
+            fallback_text="",
+            default="Surat Izin Sakit" if is_sakit else "Surat Pribadi",
+        )
+    else:
+        nama_surat = str(
+            payload.get("judul_surat")
+            or context_data.get("nama_surat")
+            or "SURAT KETERANGAN RESMI"
+        )
+    tujuan_surat = str(
+        payload.get("dosen_tujuan")
+        or payload.get("instansi_tujuan")
+        or payload.get("nama_instansi_tujuan")
+        or payload.get("penerima")
+        or payload.get("tujuan")
+        or ""
+    ).strip()
+    _bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    _now = timezone.localtime(timezone.now()) if timezone.is_aware(timezone.now()) else timezone.now()
+    tanggal_surat = str(context_data.get("tanggal_surat") or f"{_now.day} {_bulan[_now.month - 1]} {_now.year}")
     kota_surat = str(context_data.get("kota_surat") or os.environ.get("UNIVERSITY_CITY", "Yogyakarta"))
-    raw_jabatan = (
-        payload.get("_signer_jabatan")
-        or context_data.get("jabatan_penandatangan")
-        or f"Dekan Fakultas {fakultas_clean}"
-    )
-    jabatan_pejabat = humanize_jabatan(raw_jabatan, fakultas_clean)
-    nama_pejabat = str(
-        payload.get("_signer_nama")
-        or context_data.get("nama_penandatangan")
-        or "Dr. Joel Evans, M.T."
-    )
-    nip_pejabat = str(
-        payload.get("_signer_nip")
-        or context_data.get("nip_penandatangan")
-        or "198001012005011001"
-    )
-    qr_url = str(context_data.get("qr_verification_code") or context_data.get("qr_code_url") or nomor_surat)
     sig_local_path, sig_data_uri = resolve_signature_path_and_uri(
         surat_id=surat_id,
-        lecturer=context_data.get("lecturer"),
+        lecturer=None if is_custom else context_data.get("lecturer"),
         context_data={**payload, **context_data},
     )
     if sig_local_path and os.path.exists(sig_local_path):
@@ -86,11 +137,70 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
     else:
         sig_block_html = "<br/><br/><br/><br/>"
     paragraphs_html = "".join(
-        f"<p style='text-align: justify; margin: 0 0 10px 0; line-height: 1.55;'>{p.strip()}</p>"
+        f"<p style='text-align: justify; margin: 0 0 11px 0; line-height: 1.6;'>{p.strip()}</p>"
         for p in isi_clean.splitlines()
         if p.strip()
-    ) or f"<p style='text-align: justify; line-height: 1.55;'>{isi_clean}</p>"
-    html_doc = f"""<!DOCTYPE html>
+    ) or f"<p style='text-align: justify; line-height: 1.6;'>{isi_clean}</p>"
+    if is_custom:
+        # Format Surat Non-Formal & Surat Sakit:
+        # 1) Tanpa Kop Surat & Tanpa Nomor Surat
+        # 2) Tanggal di kanan atas, Yth. Penerima di kiri atas
+        # 3) TTD Mahasiswa: Surat Sakit pakai Nama + NIM, Surat Custom Non-Formal hanya Nama saja
+        yth_block = ""
+        if tujuan_surat:
+            yth_clean = re.sub(r"^(?:kepada\s+)?yth\.?\s*", "", tujuan_surat, flags=re.IGNORECASE).strip()
+            yth_block = (
+                f"<div style='margin-bottom: 18px; line-height: 1.5;'>"
+                f"Kepada Yth.<br/>"
+                f"<b>{yth_clean}</b><br/>"
+                f"di Tempat"
+                f"</div>"
+            )
+        nim_footer_html = f"<br/><span style='font-size: 10.5pt; color: #333333;'>NIM. {nim_mhs}</span>" if is_sakit else ""
+        html_doc = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Times, serif; font-size: 12pt; color: #000000; padding: 12px 22px;">
+  {yth_block}
+  <div style="text-align: center; margin: 10px 0 20px 0;">
+    <div style="font-size: 13pt; font-weight: bold; text-decoration: underline;">{nama_surat.upper()}</div>
+  </div>
+  <div style="margin-bottom: 24px;">{paragraphs_html}</div>
+  <br/>
+  <table style="width: 100%;">
+    <tr>
+      <td style="width: 56%;"></td>
+      <td style="width: 44%; text-align: left; vertical-align: top;">
+        {kota_surat}, {tanggal_surat}<br/>
+        Hormat saya,
+        {sig_block_html}
+        <b><u>{nama_mhs}</u></b>{nim_footer_html}
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+    else:
+        raw_jabatan = (
+            payload.get("_signer_jabatan")
+            or context_data.get("jabatan_penandatangan")
+            or f"Dekan Fakultas {fakultas_clean}"
+        )
+        jabatan_pejabat = humanize_jabatan(raw_jabatan, fakultas_clean)
+        nama_pejabat = str(
+            payload.get("_signer_nama")
+            or context_data.get("nama_penandatangan")
+            or "Pejabat Penandatangan"
+        )
+        nip_pejabat = str(
+            payload.get("_signer_nip")
+            or context_data.get("nip_penandatangan")
+            or "-"
+        )
+        qr_url = str(context_data.get("qr_verification_code") or context_data.get("qr_code_url") or nomor_surat)
+        qr_img_html = _build_qr_img_html(qr_url)
+        qr_token = qr_url.rstrip("/").split("/")[-1][:8].upper()
+        html_doc = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family: Times, serif; font-size: 11.5pt; color: #000000;">
@@ -123,9 +233,11 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
   <br/>
   <table style="width: 100%;">
     <tr>
-      <td style="width: 50%; font-size: 8.5pt; color: #333333; vertical-align: bottom;">
-        <b>TERVERIFIKASI ELEKTRONIK (ASURA)</b><br/>
-        Kode Verifikasi: {qr_url}
+      <td style="width: 50%; font-size: 7.5pt; color: #333333; vertical-align: bottom;">
+        {qr_img_html}<br/>
+        <b>Ditandatangani secara elektronik (ASURA)</b><br/>
+        Pindai QR untuk memeriksa keaslian.<br/>
+        Kode: {qr_token}
       </td>
       <td style="width: 50%; vertical-align: top;">
         {kota_surat}, {tanggal_surat}<br/>

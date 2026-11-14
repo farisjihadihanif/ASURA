@@ -1,10 +1,13 @@
 from surat.services.conversational_ai import generate_conversational_reply
+import logging
 import re
 from typing import Dict, Any, Optional
 from surat.models import SuratType, ChatThread
 from .detect_intent import detect_intent_dynamically, STOP_WORDS, CATEGORY_WORDS
 from .route_intent import route_intent_with_ai, IntentCategoryEnum, IntentRouterOutput
 from surat.agents.letter_agent import SuratDraftingAgent
+
+logger = logging.getLogger(__name__)
 from surat.agents.prompts import (
     CHAT_GREETING_MESSAGE,
     format_state2_missing_parameters,
@@ -211,6 +214,11 @@ def validate_and_normalize_slot(
             has_attachments=has_attachments,
         )
 
+    if field_name == "judul_surat":
+        from .custom_letter_ai import normalize_letter_title
+
+        return normalize_letter_title(cleaned_val) or None
+
     if is_pure_date_expression(cleaned_val):
         return None
     if not has_attachments and is_pure_date_expression(user_message):
@@ -258,6 +266,18 @@ def handle_incoming_chat_with_redis(
 
     # Ambil instance ChatThread di database untuk update field document_type jika perlu
     thread_obj = ChatThread.objects.filter(id=thread_id).first()
+
+    # 0. Revisi dari dosen: surat terakhir di thread ini berstatus REVISION_REQUIRED
+    try:
+        from .revision_assistant import find_pending_revision, handle_revision_message
+
+        pending_rev = find_pending_revision(thread_id) if thread_obj else None
+        if pending_rev is not None:
+            new_kode = detect_intent_dynamically(cleaned_msg)
+            if not new_kode or new_kode == pending_rev.kode_surat_id:
+                return handle_revision_message(pending_rev, thread_obj, cleaned_msg)
+    except Exception:
+        logger.exception("Penanganan revisi gagal, lanjut alur biasa")
 
     # 1. Cek apakah sedang menunggu konfirmasi switch intent
     if waiting_confirmation:
@@ -307,6 +327,14 @@ def handle_incoming_chat_with_redis(
 
         elif router_result.category == IntentCategoryEnum.AMBIGUOUS:
             cand_kodes = [k.value for k in router_result.candidate_kodes]
+            if not cand_kodes:
+                # Tanpa kandidat, jangan kunci sesi: tanya balik saja agar user bisa menjawab bebas.
+                return (
+                    router_result.explanation_or_response
+                    if router_result.explanation_or_response and len(router_result.explanation_or_response) > 15
+                    else "Aku sudah menerima pesan dan lampiranmu. Surat apa yang ingin kamu buat? "
+                         "Contoh: surat izin sakit, surat keterangan masih kuliah, atau surat izin magang."
+                )
             session_data["is_waiting_for_intent_clarification"] = True
             session_data["candidate_intents"] = cand_kodes
             session_data["staged_slots"] = router_result.extracted_parameters
@@ -330,6 +358,26 @@ def handle_incoming_chat_with_redis(
             return format_out_of_context_response(cleaned_msg)
 
         elif router_result.category == IntentCategoryEnum.GREETING_OR_CHITCHAT:
+            try:
+                from .conversational_ai import generate_conversational_reply
+                _hist = (
+                    list(thread_obj.messages.order_by('created_at').values('sender', 'message'))
+                    if thread_obj else []
+                )
+                _stu = {}
+                _student = getattr(getattr(thread_obj, 'user', None), 'student_profile', None) if thread_obj else None
+                if _student:
+                    _stu = {
+                        'nama': getattr(getattr(_student, 'user', None), 'nama', '-'),
+                        'nim': getattr(_student, 'nim', '-'),
+                        'prodi': getattr(getattr(_student, 'prodi', None), 'nama_prodi', '-'),
+                        'semester': getattr(_student, 'semester_aktif', '-'),
+                    }
+                _smart = generate_conversational_reply(user_message=cleaned_msg, history_messages=_hist, student_info=_stu)
+                if _smart:
+                    return _smart
+            except Exception:
+                logger.exception("Balasan percakapan AI gagal, memakai balasan standar")
             return CHAT_GREETING_MESSAGE
 
         return format_out_of_context_response(cleaned_msg)
@@ -406,6 +454,18 @@ def handle_intent_clarification_choice(
         idx = int(cleaned) - 1
         if 0 <= idx < len(candidate_intents):
             chosen_code = candidate_intents[idx]
+
+    # 4. Jawaban bebas: user mengetik jenis surat langsung (mis. "surat izin sakit"), bukan memilih tombol
+    if not chosen_code:
+        _free = detect_intent_dynamically(cleaned)
+        if _free:
+            chosen_code = _free
+
+    if not chosen_code and not candidate_intents:
+        # Tidak ada kandidat yang bisa dipilih: lepas status menunggu dan proses sebagai pesan biasa
+        session_data["is_waiting_for_intent_clarification"] = False
+        session_data["candidate_intents"] = []
+        return handle_incoming_chat_with_redis(thread_id, user_message, session_data, attachments)
 
     if not chosen_code:
         # Jika user mengetik pembatalan
@@ -637,7 +697,11 @@ def process_slot_filling_redis(
             + chr(10) * 2
             + slots_summary
             + chr(10) * 2
-            + "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah untuk mengirim draf ke antrean persetujuan dosen."
+            + (
+                "Silakan klik tombol **Buat Surat Custom** di bawah. Surat pribadi ini langsung jadi tanpa persetujuan dosen."
+                if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
+                else "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah untuk mengirim draf ke antrean persetujuan dosen."
+            )
         )
     # 1. GUNAKAN AI / EXTRACTOR UNTUK MENANGKAP SLOT DARI PESAN BEBAS USER & BERKAS LAMPIRAN
     # Menggunakan SuratDraftingAgent atau fungsi helper ekstraksi slot berstandar LLM
@@ -748,6 +812,14 @@ def process_slot_filling_redis(
             if fk in missing_fields_before or not current_slots.get(fk):
                 current_slots[fk] = val
 
+    # Surat custom: judul otomatis mengikuti keperluan bila belum disebut jelas.
+    if str(session_data.get("intent") or "").upper().startswith("CUSTOM") and not current_slots.get("judul_surat"):
+        from .custom_letter_ai import normalize_letter_title
+
+        _auto_title = normalize_letter_title(current_slots.get("keperluan_surat")) or normalize_letter_title(user_message)
+        if _auto_title:
+            current_slots["judul_surat"] = _auto_title
+
     session_data["slots"] = current_slots
 
     # 3. Evaluasi kelengkapan parameter (State 2 vs State 3)
@@ -785,7 +857,12 @@ def process_slot_filling_redis(
         + chr(10) * 2
         + summary_lines
         + chr(10) * 2
-        + "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah agar draf surat segera disusun dan dikirim ke dosen untuk di-ACC."
+        + (
+            "Silakan klik tombol **Buat Surat Custom** di bawah agar surat segera disusun. "
+            "Surat pribadi ini tidak dikirim ke dosen dan tidak perlu persetujuan."
+            if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
+            else "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah agar draf surat segera disusun dan dikirim ke dosen untuk di-ACC."
+        )
     )
 
 def sanitize_extracted_slot(field_name: str, raw_value: Any) -> Any:

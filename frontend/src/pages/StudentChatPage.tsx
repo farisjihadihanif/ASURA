@@ -107,15 +107,20 @@ export const StudentChatPage: React.FC = () => {
       setLatestRequest(null);
     }
   }, [threadId, loadThreadDetail]);
-  // Polling realtime setiap 2.5 detik saat surat sedang diproses/menunggu ACC dosen
+  // Sinkron realtime lintas perangkat (web <-> desktop): polling thread aktif, daftar riwayat, dan saat jendela kembali fokus
   useEffect(() => {
-    if (!activeThreadId || !latestRequest) return;
-    if (['SENT', 'PRINTED'].includes(latestRequest.status)) return;
-    const timer = window.setInterval(() => {
-      void loadThreadDetail(activeThreadId);
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [activeThreadId, latestRequest, loadThreadDetail]);
+    const tick = () => {
+      if (document.hidden || sending) return;
+      if (activeThreadId) void loadThreadDetail(activeThreadId);
+      void loadSidebarData();
+    };
+    const timer = window.setInterval(tick, 3000);
+    window.addEventListener('focus', tick);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', tick);
+    };
+  }, [activeThreadId, sending, loadThreadDetail, loadSidebarData]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sending, latestRequest, canSubmitNow]);
@@ -162,7 +167,7 @@ export const StudentChatPage: React.FC = () => {
         {
           id: `err-sub-${Date.now()}`,
           sender: 'assistant',
-          text: extractErrorMessage(err, 'Gagal mengajukan surat ke dosen.'),
+          text: extractErrorMessage(err, 'Gagal mengAjukan Surat ke Dosen.'),
         },
       ]);
     } finally {
@@ -320,8 +325,9 @@ export const StudentChatPage: React.FC = () => {
                   </h3>
                   <p className="text-xs text-[#857870] mt-1.5 max-w-md mx-auto leading-relaxed">
                     Ceritakan surat akademik yang kamu butuhkan. ASURA akan mengumpulkan detail,
-                    menyiapkan draf, meneruskannya ke dosen untuk di-ACC, lalu siap dikirim ke email
-                    atau dicetak ke printer.
+                    menyiapkan draf, lalu surat kampus diteruskan ke pejabat kampus untuk di-ACC. Surat
+                    custom (pribadi) langsung jadi tanpa persetujuan. Setelah itu siap dikirim ke email atau
+                    dicetak ke printer.
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-2 pt-2">
@@ -387,8 +393,9 @@ export const StudentChatPage: React.FC = () => {
                   <span>Data Permohonan Lengkap ({detectedIntent})</span>
                 </div>
                 <p className="text-xs text-[#857870] mt-1">
-                  Klik tombol di bawah agar ASURA menyusun draf resmi dan mengirimkan notifikasi
-                  persetujuan ke dosen.
+                  {String(detectedIntent || '').toUpperCase().startsWith('CUSTOM')
+                    ? 'Klik tombol di bawah agar ASURA langsung menyusun suratmu. Surat pribadi ini tidak dikirim ke dosen dan tidak perlu persetujuan.'
+                    : 'Klik tombol di bawah agar ASURA menyusun draf resmi dan mengirimkan notifikasi persetujuan ke pejabat kampus.'}
                 </p>
                 <button
                   type="button"
@@ -401,7 +408,7 @@ export const StudentChatPage: React.FC = () => {
                   ) : (
                     <CheckCircle2 className="w-4 h-4" />
                   )}
-                  <span>Ajukan Surat ke Dosen</span>
+                  <span>Buat & Proses Surat</span>
                 </button>
               </div>
             )}
@@ -511,6 +518,7 @@ export const StudentChatPage: React.FC = () => {
   );
 };
 export default StudentChatPage;
+
 
 
 

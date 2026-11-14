@@ -7,6 +7,12 @@ let mainWindow;
 let tray;
 let localBridgeServer;
 let isExpanded = false;
+let suppressAutoCollapse = false;
+let suppressUntil = 0;
+function holdCollapse(ms = 5000) {
+  suppressUntil = Date.now() + ms;
+}
+let blurCollapseTimer = null;
 const API_BASE_URL = (process.env.ASURA_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 const SESSION_FILE = path.join(app.getPath('userData'), 'asura-session.json');
 const PRINT_BRIDGE_PORT = 38911;
@@ -25,6 +31,13 @@ function writeSession(data) {
   } catch (err) {
     console.error('[ASURA] Gagal menyimpan sesi:', err);
   }
+}
+function withActiveAccount(session) {
+  const accounts = (session.accounts || []).filter((a) => a.user?.nip_nim !== session.user?.nip_nim);
+  if (session.user && session.access) {
+    accounts.unshift({ access: session.access, refresh: session.refresh, user: session.user });
+  }
+  return { ...session, accounts: accounts.slice(0, 5) };
 }
 function clearSession() {
   try {
@@ -99,17 +112,31 @@ const isAllowedExternalUrl = (value) => {
 function widgetBounds(expanded) {
   const display = screen.getPrimaryDisplay();
   const { x, y, width, height } = display.workArea;
-  const windowWidth = expanded ? Math.min(440, width - 32) : 180;
-  const windowHeight = expanded ? Math.min(720, height - 32) : 190;
-  return { width: windowWidth, height: windowHeight, x: x + width - windowWidth - 24, y: y + height - windowHeight - 24 };
+  const windowWidth = expanded ? Math.min(440, width - 32) : 170;
+  const windowHeight = expanded ? Math.min(720, height - 32) : 185;
+  return {
+    width: windowWidth,
+    height: windowHeight,
+    x: x + width - windowWidth - 20,
+    y: y + height - windowHeight - 20,
+  };
 }
 function resizeWidget(expanded) {
-  isExpanded = expanded;
-  if (!mainWindow) return;
-  mainWindow.setBounds(widgetBounds(expanded), true);
+  isExpanded = Boolean(expanded);
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBounds(widgetBounds(isExpanded), false);
   mainWindow.setIgnoreMouseEvents(false);
-  mainWindow.focus();
-  if (expanded) mainWindow.show();
+  mainWindow.show();
+  if (isExpanded) {
+    mainWindow.focus();
+  }
+}
+function collapseToMascot() {
+  if (!isExpanded) return;
+  resizeWidget(false);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('widget:auto-collapsed');
+  }
 }
 function assertTrustedSender(event) {
   const senderUrl = event.senderFrame?.url || '';
@@ -131,20 +158,34 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      webSecurity: true
-    }
+      webSecurity: true,
+    },
   });
   mainWindow.setAlwaysOnTop(true, 'floating');
   mainWindow.setIgnoreMouseEvents(false);
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) shell.openExternal(url);
+    if (isAllowedExternalUrl(url)) { holdCollapse(); shell.openExternal(url); }
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+  // Ketika user klik di luar area chat pop-up, otomatis minimize kembali ke ikon maskot
+  mainWindow.on('blur', () => {
+    if (blurCollapseTimer) clearTimeout(blurCollapseTimer);
+    blurCollapseTimer = setTimeout(() => {
+      if (isExpanded && !suppressAutoCollapse && Date.now() >= suppressUntil && mainWindow && !mainWindow.isFocused()) {
+        collapseToMascot();
+      }
+    }, 150);
+  });
+  mainWindow.on('focus', () => {
+    if (blurCollapseTimer) {
+      clearTimeout(blurCollapseTimer);
+      blurCollapseTimer = null;
+    }
+  });
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    mainWindow.focus();
   });
 }
 async function resolveTargetPrinter(preferredDeviceName = '') {
@@ -158,13 +199,10 @@ async function resolveTargetPrinter(preferredDeviceName = '') {
     const exact = printers.find((p) => p.name === preferredDeviceName);
     if (exact) return { name: exact.name, isVirtual: isVirtualName(exact.name) };
   }
-  // Prioritas 1: Printer fisik default
   const physicalDefault = printers.find((p) => p.isDefault && !isVirtualName(p.name));
   if (physicalDefault) return { name: physicalDefault.name, isVirtual: false };
-  // Prioritas 2: Printer fisik mana pun yang tersedia
   const anyPhysical = printers.find((p) => !isVirtualName(p.name));
   if (anyPhysical) return { name: anyPhysical.name, isVirtual: false };
-  // Prioritas 3 (jika hanya printer virtual di sistem): hindari Adobe PDF yang bermasalah pada Chromium
   const msPdf = printers.find((p) => /microsoft print to pdf/i.test(p.name));
   if (msPdf) return { name: msPdf.name, isVirtual: true };
   const safeFallback = printers.find((p) => !/adobe pdf/i.test(p.name)) || printers[0];
@@ -210,12 +248,6 @@ async function printPdfDirectToPrinter(requestId, deviceName = '') {
         }
       });
     });
-    if (Notification.isSupported()) {
-      new Notification({
-        title: 'ASURA Print Agent',
-        body: `Dokumen resmi dicetak ke ${targetPrinter.name || 'Printer Default'}.`,
-      }).show();
-    }
     return { printed: true, deviceName: targetPrinter.name || 'Printer Default' };
   } finally {
     if (!printWin.isDestroyed()) {
@@ -271,8 +303,9 @@ function startLocalPrintBridge() {
 function registerIpc() {
   ipcMain.handle('window:set-mode', (event, expanded) => { assertTrustedSender(event); resizeWidget(Boolean(expanded)); });
   ipcMain.handle('window:close-popup', (event) => { assertTrustedSender(event); resizeWidget(false); });
-  ipcMain.handle('config:get', (event) => { assertTrustedSender(event); return { apiBaseUrl: API_BASE_URL, demoAccounts: true }; });
-  ipcMain.handle('config:set', (event) => { assertTrustedSender(event); return { apiBaseUrl: API_BASE_URL, demoAccounts: true }; });
+  ipcMain.handle('window:set-auto-close-lock', (event, locked) => { assertTrustedSender(event); suppressAutoCollapse = Boolean(locked); });
+  ipcMain.handle('config:get', (event) => { assertTrustedSender(event); return { apiBaseUrl: API_BASE_URL, demoAccounts: !app.isPackaged }; });
+  ipcMain.handle('config:set', (event) => { assertTrustedSender(event); return { apiBaseUrl: API_BASE_URL, demoAccounts: !app.isPackaged }; });
   ipcMain.handle('session:get-user', (event) => { assertTrustedSender(event); return readSession().user || null; });
   ipcMain.handle('auth:login', async (event, credentials) => {
     assertTrustedSender(event);
@@ -281,11 +314,13 @@ function registerIpc() {
       endpoint: '/api/accounts/login/',
       body: credentials,
     });
-    writeSession({
+    const prev = readSession();
+    writeSession(withActiveAccount({
       access: result.access,
       refresh: result.refresh,
       user: result.user,
-    });
+      accounts: prev.accounts || [],
+    }));
     return result.user;
   });
   ipcMain.handle('auth:logout', async (event) => {
@@ -296,7 +331,66 @@ function registerIpc() {
         await callBackend({ method: 'POST', endpoint: '/api/accounts/logout/', body: { refresh: s.refresh } });
       }
     } catch {} finally {
-      clearSession();
+      const rest = (s.accounts || []).filter((a) => a.user?.nip_nim !== s.user?.nip_nim);
+      if (rest.length) writeSession({ access: null, refresh: null, user: null, accounts: rest });
+      else clearSession();
+    }
+  });
+  ipcMain.handle('auth:register-lookup', async (event, nipNim) => {
+    assertTrustedSender(event);
+    const res = await callBackend({
+      method: 'GET',
+      endpoint: `/api/accounts/register/lookup/?nip_nim=${encodeURIComponent(String(nipNim || '').trim())}`,
+    });
+    return res.data || res;
+  });
+  ipcMain.handle('auth:register', async (event, payload) => {
+    assertTrustedSender(event);
+    const result = await callBackend({
+      method: 'POST',
+      endpoint: '/api/accounts/register/',
+      body: { nip_nim: payload.nip_nim, email: payload.email, password: payload.password },
+    });
+    const prev = readSession();
+    writeSession(withActiveAccount({
+      access: result.access,
+      refresh: result.refresh,
+      user: result.user,
+      accounts: prev.accounts || [],
+    }));
+    return result.user;
+  });
+  ipcMain.handle('auth:list-accounts', (event) => {
+    assertTrustedSender(event);
+    const s = withActiveAccount(readSession());
+    return s.accounts.map((a) => ({
+      nip_nim: a.user.nip_nim,
+      nama: a.user.nama,
+      role: a.user.role,
+      active: a.user.nip_nim === readSession().user?.nip_nim,
+    }));
+  });
+  ipcMain.handle('auth:add-account', (event) => {
+    assertTrustedSender(event);
+    const s = withActiveAccount(readSession());
+    writeSession({ access: null, refresh: null, user: null, accounts: s.accounts });
+    return true;
+  });
+  ipcMain.handle('auth:switch-account', async (event, nipNim) => {
+    assertTrustedSender(event);
+    const s = withActiveAccount(readSession());
+    const target = s.accounts.find((a) => a.user.nip_nim === nipNim);
+    if (!target) throw new Error('Akun tidak ditemukan.');
+    writeSession({ access: target.access, refresh: target.refresh, user: target.user, accounts: s.accounts });
+    try {
+      const me = await callBackend({ method: 'GET', endpoint: '/api/accounts/me/' });
+      const cur = readSession();
+      writeSession(withActiveAccount({ ...cur, user: me && me.nip_nim ? { ...cur.user, ...me } : cur.user }));
+      return readSession().user;
+    } catch {
+      const rest = s.accounts.filter((a) => a.user.nip_nim !== nipNim);
+      writeSession({ access: null, refresh: null, user: null, accounts: rest });
+      throw new Error('Sesi akun sudah kedaluwarsa, silakan masuk lagi.');
     }
   });
   ipcMain.handle('api:call', async (event, request) => { assertTrustedSender(event); return callBackend(request); });
@@ -304,6 +398,7 @@ function registerIpc() {
     assertTrustedSender(event);
     const subject = encodeURIComponent(options.subject || 'Surat ASURA');
     const body = encodeURIComponent(options.body || '');
+    holdCollapse(15000);
     await shell.openExternal(`mailto:${encodeURIComponent(options.to || '')}?subject=${subject}&body=${body}`);
     return { mode: 'mailto' };
   });
@@ -340,7 +435,7 @@ function createTray() {
     { label: 'Tampilkan ASURA', click: () => { mainWindow.show(); resizeWidget(true); } },
     { label: 'Sembunyikan', click: () => mainWindow.hide() },
     { type: 'separator' },
-    { label: 'Keluar', click: () => app.quit() }
+    { label: 'Keluar', click: () => app.quit() },
   ]));
 }
 app.on('window-all-closed', (event) => event.preventDefault());

@@ -1,3 +1,4 @@
+from .services.conversational_ai import upgrade_static_assistant_reply
 import base64
 import logging
 import os
@@ -50,6 +51,7 @@ from .services.workflow_service import process_approval_action, route_and_distri
 from .services.manual_handlers import create_approval_workflow_for_request
 from .services.session_manager import AutoSuratSessionManager
 from .services.notifications import notify_user
+from .services.eligibility import check_eligibility
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +152,16 @@ def _execute_drafting_agent_worker(
             ]
         )
 
+        if str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"):
+            # Surat custom bersifat pribadi: tidak masuk antrean dosen dan tidak ada notifikasi ke dosen.
+            SuratApproval.objects.filter(surat_request=surat_req).delete()
+            SuratAuditLog.objects.create(
+                surat_request=surat_req,
+                action_id="AI_02",
+                action="CUSTOM_LETTER_READY_NO_APPROVAL",
+            )
+            return
+
         create_approval_workflow_for_request(surat_req, surat_req.student)
 
         for app_step in SuratApproval.objects.filter(
@@ -234,9 +246,21 @@ def _execute_redraft_agent_worker(
             ]
         )
 
-        if surat_req.status == SuratStatus.PENDING_APPROVAL:
+        if surat_req.status == SuratStatus.PENDING_APPROVAL and not str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"):
+            # Hapus antrean lama agar pengajuan ulang tidak menggandakan approval.
+            SuratApproval.objects.filter(surat_request=surat_req).delete()
             create_approval_workflow_for_request(surat_req, surat_req.student)
             ensure_approval_queue_for_request(surat_req)
+            for app_step in SuratApproval.objects.filter(
+                surat_request=surat_req, status=ApprovalStatus.PENDING
+            ).select_related("approver__user"):
+                notify_user(
+                    app_step.approver.user,
+                    "APPROVAL_REQUIRED",
+                    f"Revisi Diajukan Ulang: {surat_req.kode_surat.nama_surat}",
+                    f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan ulang surat setelah revisi.",
+                    surat_req,
+                )
 
         SuratAuditLog.objects.create(
             surat_request=surat_req,
@@ -314,6 +338,8 @@ class NotificationListAPIView(APIView):
 
     def get(self, request):
         queryset = Notification.objects.filter(user=request.user)
+        if hasattr(request.user, 'lecturer_profile'):
+            queryset = queryset.exclude(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
         if request.query_params.get('unread') == '1':
             queryset = queryset.filter(is_read=False)
         return Response(
@@ -337,7 +363,10 @@ class NotificationUnreadCountAPIView(APIView):
     authentication_classes = [CustomJWTAuthentication]
 
     def get(self, request):
-        return Response({'count': Notification.objects.filter(user=request.user, is_read=False).count()})
+        qs = Notification.objects.filter(user=request.user, is_read=False)
+        if hasattr(request.user, 'lecturer_profile'):
+            qs = qs.exclude(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
+        return Response({'count': qs.count()})
 
 
 class NotificationReadAPIView(APIView):
@@ -370,6 +399,18 @@ class ChatSessionMessageAPIView(APIView):
         attachment_files = request.FILES.getlist('attachments')
 
         if not user_msg and not attachment_files:
+            # === ASURA_CONVERSATIONAL_UPGRADE ===
+            try:
+                _last_ai = thread.messages.filter(sender='assistant').order_by('-created_at').first()
+                _stu_obj = getattr(request.user, 'student_profile', None) or getattr(thread, 'student', None)
+                _raw_msg = str(request.data.get('message') or request.data.get('text') or '')
+                if _last_ai:
+                    _upgraded = upgrade_static_assistant_reply(_last_ai.message, _raw_msg, thread=thread, student=_stu_obj)
+                    if _upgraded and _upgraded != _last_ai.message:
+                        _last_ai.message = _upgraded
+                        _last_ai.save(update_fields=['message'])
+            except Exception:
+                pass
             return Response(
                 {"status": "error", "message": "Pesan atau berkas lampiran tidak boleh kosong."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -700,7 +741,12 @@ class SuratTypeListAPIView(ListAPIView):
     def get_queryset(self):
         from .services.campus_catalog import ensure_campus_surat_types
         ensure_campus_surat_types()
-        return SuratType.objects.all().order_by('kategori', 'nama_surat')
+        from django.db.models import Q
+        from .services.campus_catalog import CATALOG_CODES
+        # Hanya katalog kampus + surat custom; seed lama (mis. SK-KUL) tidak ditampilkan.
+        return SuratType.objects.filter(
+            Q(kode_surat__in=CATALOG_CODES) | Q(kode_surat__startswith='CUSTOM')
+        ).order_by('kategori', 'nama_surat')
 
 
 class SuratRequestCreateAPIView(APIView):
@@ -716,6 +762,61 @@ class SuratRequestCreateAPIView(APIView):
         try:
             student_obj = request.user.student_profile
         except (Student.DoesNotExist, AttributeError):
+            # === ASURA_CUSTOM_SELF_SIGNED_BYPASS ===
+            try:
+                _created_id = None
+                if 'surat_request' in locals() and surat_request is not None:
+                    _created_id = surat_request.id
+                elif 'req_obj' in locals() and req_obj is not None:
+                    _created_id = req_obj.id
+                _sr_custom = SuratRequest.objects.select_related('student', 'student__user', 'student__prodi', 'student__fakultas', 'kode_surat').filter(pk=_created_id).first() if _created_id else None
+                if _sr_custom and str(_sr_custom.kode_surat.kode_surat or '').upper().startswith('CUSTOM'):
+                    from .models import SuratApproval as _SA_Custom, ChatThread as _CT_Custom, ChatMessage as _CM_Custom
+                    from .services.custom_letter_ai import generate_custom_letter_body
+                    from .services.pdf_generator_safe import generate_and_save_official_pdf as _gen_custom_pdf
+                    _SA_Custom.objects.filter(surat_request=_sr_custom).delete()
+                    _pdata = dict(_sr_custom.payload_data or {})
+                    _pdata['_is_custom_personal'] = True
+                    _custom_body = generate_custom_letter_body(
+                        student=_sr_custom.student,
+                        payload_data=_pdata,
+                        user_prompt_context=_sr_custom.user_prompt_context,
+                    )
+                    _sr_custom.ai_original_draft = _custom_body
+                    _sr_custom.final_approved_content = _custom_body
+                    _sr_custom.status = SuratStatus.APPROVED
+                    _sr_custom.nomor_surat_resmi = f'CUSTOM/{_sr_custom.id:03d}/2026'
+                    _sr_custom.payload_data = _pdata
+                    _sr_custom.save()
+                    _gen_custom_pdf({
+                        'id': _sr_custom.id,
+                        'surat_request_id': _sr_custom.id,
+                        'kode_surat': 'CUSTOM-UMUM',
+                        'is_custom_personal': True,
+                        'nomor_surat': _sr_custom.nomor_surat_resmi,
+                        'nama_surat': _pdata.get('judul_surat') or _sr_custom.kode_surat.nama_surat or 'Surat Custom',
+                        'nama_mahasiswa': _sr_custom.student.user.nama,
+                        'nim': _sr_custom.student.nim,
+                        'program_studi': getattr(getattr(_sr_custom.student, 'prodi', None), 'nama_prodi', None) or 'Informatika',
+                        'fakultas': getattr(getattr(_sr_custom.student, 'fakultas', None), 'nama_fakultas', None) or 'Teknik',
+                        'final_approved_content': _custom_body,
+                        'isi_surat': _custom_body,
+                        'payload': _pdata,
+                    })
+                    _th_c = _CT_Custom.objects.filter(latest_surat_request=_sr_custom).first()
+                    if _th_c:
+                        _last_m = _th_c.messages.filter(sender='assistant').order_by('-created_at').first()
+                        _ready_msg = (
+                            f"Surat custom **{_pdata.get('judul_surat') or 'Surat Pribadi'}** sudah selesai disusun atas nama dan tanda tangan kamu sendiri (tanpa perlu persetujuan dosen).\n\n"
+                            "Kamu bisa langsung memasang gambar tanda tanganmu lewat tombol Upload TTD Saya, mengirim ke Email, atau mencetak ke Printer."
+                        )
+                        if _last_m:
+                            _last_m.message = _ready_msg
+                            _last_m.save(update_fields=['message'])
+                        else:
+                            _CM_Custom.objects.create(thread=_th_c, sender='assistant', message=_ready_msg)
+            except Exception:
+                pass
             return Response(
                 {"status": "error", "message": "Validasi gagal", "errors": "Hanya mahasiswa yang dapat mengajukan surat."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -723,8 +824,16 @@ class SuratRequestCreateAPIView(APIView):
 
         serializer = SuratRequestCreateSerializer(data=request.data, context={"request": request})
         if not serializer.is_valid():
+            def _flatten_errors(err):
+                if isinstance(err, dict):
+                    return " ".join(_flatten_errors(x) for x in err.values())
+                if isinstance(err, (list, tuple)):
+                    return " ".join(_flatten_errors(x) for x in err)
+                return str(err)
+
+            reason = _flatten_errors(serializer.errors).strip() or "Validasi gagal"
             return Response(
-                {"status": "error", "message": "Validasi gagal", "errors": serializer.errors},
+                {"status": "error", "message": reason, "errors": serializer.errors},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -733,6 +842,13 @@ class SuratRequestCreateAPIView(APIView):
             surat_type = SuratType.objects.get(kode_surat=kode_surat_str)
         except SuratType.DoesNotExist:
             return Response({"status": "error", "errors": "Jenis surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        not_eligible = check_eligibility(student_obj, surat_type.kode_surat)
+        if not_eligible:
+            return Response(
+                {"status": "error", "message": not_eligible, "errors": not_eligible},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user_prompt_context = serializer.validated_data.get("user_prompt_context", "")
         initial_payload = serializer.validated_data.get("payload_data") or {}
@@ -767,8 +883,12 @@ class SuratRequestCreateAPIView(APIView):
                 thread=linked_thread,
                 sender="assistant",
                 message=(
-                    f"📨 Permohonan **{surat_type.nama_surat}** telah diajukan ke sistem. "
-                    f"ASURA sedang menyusun draf resmi dan meneruskannya ke dosen untuk di-ACC."
+                    f"📨 Permohonan **{surat_type.nama_surat}** telah diterima. "
+                    + (
+                        "ASURA sedang menyusun suratmu. Surat ini bersifat pribadi, tidak dikirim ke dosen dan tidak perlu persetujuan."
+                        if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
+                        else "ASURA sedang menyusun draf resmi dan meneruskannya ke dosen untuk di-ACC."
+                    )
                 ),
                 slots_snapshot={"event": "SURAT_SUBMITTED", "surat_request_id": surat_req.id},
             )
@@ -796,7 +916,11 @@ class SuratRequestCreateAPIView(APIView):
         return Response(
             {
                 "status": "success",
-                "message": f"Permohonan surat {surat_type.nama_surat} berhasil diterima dan diteruskan ke dosen.",
+                "message": (
+                    f"Permohonan surat {surat_type.nama_surat} berhasil diterima. Surat pribadi ini tidak perlu persetujuan dosen."
+                    if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
+                    else f"Permohonan surat {surat_type.nama_surat} berhasil diterima dan diteruskan ke dosen."
+                ),
                 "request_id": surat_req.id,
                 "surat_status": surat_req.status,
                 "data": {"request_id": surat_req.id, "kode_surat": surat_type.kode_surat, "status": surat_req.status},
@@ -818,15 +942,12 @@ class SuratRequestListAPIView(ListAPIView):
             lecturer = user.lecturer_profile
             demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', True)
             demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
-            is_demo_lecturer = (
-                getattr(user, 'nip_nim', None) == demo_approver_nip
-                or "Joel Evans" in getattr(user, 'nama', '')
-            )
+            is_demo_lecturer = getattr(user, 'nip_nim', None) == demo_approver_nip
+            # Dosen hanya mengurus surat kampus. Surat custom (pribadi) tidak pernah tampil di dashboard dosen.
+            non_custom = SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
             if demo_enabled and is_demo_lecturer:
-                return SuratRequest.objects.all().order_by('-created_at').distinct()
-            if lecturer.fakultas:
-                return SuratRequest.objects.filter(student__fakultas=lecturer.fakultas).order_by('-created_at').distinct()
-            return SuratRequest.objects.filter(approvals__approver=lecturer).order_by('-created_at').distinct()
+                return non_custom.order_by('-created_at').distinct()
+            return non_custom.filter(approvals__approver=lecturer).order_by('-created_at').distinct()
         return SuratRequest.objects.all().order_by('-created_at')
 
 
@@ -839,7 +960,7 @@ class SuratRequestDetailAPIView(RetrieveAPIView):
         user = self.request.user
         if hasattr(user, 'student_profile'):
             return SuratRequest.objects.filter(student=user.student_profile)
-        return SuratRequest.objects.all()
+        return SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
 
 
 class LecturerApprovalActionAPIView(APIView):

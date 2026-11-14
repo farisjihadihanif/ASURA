@@ -31,11 +31,9 @@ def ensure_approval_queue_for_request(surat_request: Any) -> int:
         created_count = 0
 
         if not rules:
-            default_approver = (
-                getattr(student, "dosen_pembimbing_akademik", None)
-                or getattr(getattr(student, "prodi", None), "kaprodi", None)
-                or getattr(getattr(student, "fakultas", None), "dekan", None)
-            )
+            from surat.services.manual_handlers import resolve_official_approver
+
+            default_approver = resolve_official_approver(student, getattr(surat_type, "kode_surat", None))
             if default_approver is not None:
                 SuratApproval.objects.create(
                     surat_request=surat_request,

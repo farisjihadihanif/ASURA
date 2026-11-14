@@ -1,9 +1,20 @@
 from typing import List, Dict, Any
+# Surat yang disetujui Dekan. Selain ini, semua surat kampus disetujui Ketua Program Studi.
+DEKAN_SURAT_CODES = {"SK-MK", "SK-UKT"}
 CAMPUS_SURAT_CATALOG: List[Dict[str, Any]] = [
     # Grup Surat Keterangan
     {
         "kode_surat": "SK-MK",
         "nama_surat": "Surat Keterangan Masih Kuliah",
+        "kategori": "Surat Keterangan",
+        "is_auto_approval": False,
+        "required_payload_fields": [
+            {"field": "keperluan_surat", "label": "Keperluan Surat", "type": "string"},
+        ],
+    },
+    {
+        "kode_surat": "SK-UKT",
+        "nama_surat": "Surat Keterangan Pembayaran UKT",
         "kategori": "Surat Keterangan",
         "is_auto_approval": False,
         "required_payload_fields": [
@@ -155,6 +166,9 @@ CAMPUS_SURAT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
 ]
+CATALOG_CODES = [item["kode_surat"] for item in CAMPUS_SURAT_CATALOG]
+
+
 def ensure_campus_surat_types() -> None:
     from surat.models import SuratType
     for item in CAMPUS_SURAT_CATALOG:

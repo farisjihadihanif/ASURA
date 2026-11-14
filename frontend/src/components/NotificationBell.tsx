@@ -1,4 +1,5 @@
-﻿import React, { useEffect, useState } from "react";
+﻿import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useDismiss } from "../hooks/useDismiss";
 import { Bell, CheckCheck } from "lucide-react";
 import suratService from "../services/suratService";
 import type { NotificationItem } from "../types";
@@ -13,6 +14,9 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
   const [open, setOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [items, setItems] = useState<NotificationItem[]>([]);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const closePopup = useCallback(() => setOpen(false), []);
+  useDismiss(wrapRef, open, closePopup);
 
   const loadNotifications = async () => {
     try {
@@ -50,7 +54,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
   };
 
   return (
-    <div className="relative">
+    <div className="relative" ref={wrapRef}>
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}

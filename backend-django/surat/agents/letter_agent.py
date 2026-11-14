@@ -382,9 +382,46 @@ class SuratDraftingAgent:
                         deduped_rules.append(norm_rule)
                     if len(deduped_rules) >= 8:
                         break
+            exemplar = self._load_lecturer_exemplar(clean_code)
+            if exemplar:
+                deduped_rules.append(exemplar)
             return deduped_rules
         except Exception:
             return []
+
+    @staticmethod
+    def _load_lecturer_exemplar(kode_surat: str) -> str:
+        """
+        Memori belajar: ambil isi surat terakhir yang DIREVISI dosen sebelum di-ACC untuk
+        jenis surat yang sama, lalu jadikan contoh acuan redaksi. Hanya teks isi surat
+        (tanpa file/gambar tanda tangan) dan data identitas disensor. Surat custom dilewati.
+        """
+        try:
+            from surat.models import SuratRequest
+            from surat.agents.memory_agent import AgenticMemoryAgent
+
+            if not kode_surat or kode_surat.startswith("CUSTOM"):
+                return ""
+            candidates = (
+                SuratRequest.objects.filter(kode_surat_id=kode_surat, status__in=["APPROVED", "SENT", "PRINTED"])
+                .exclude(final_approved_content__isnull=True)
+                .exclude(final_approved_content="")
+                .order_by("-id")[:15]
+            )
+            for req in candidates:
+                original = " ".join((req.ai_original_draft or "").split())
+                final = " ".join((req.final_approved_content or "").split())
+                if final and final != original:
+                    clean = AgenticMemoryAgent._sanitize_pii_from_text(req.final_approved_content)
+                    return (
+                        "CONTOH ISI SURAT YANG SUDAH DIREVISI DAN DISETUJUI DOSEN untuk jenis surat ini. "
+                        "Tiru struktur, redaksi, dan urutan paragrafnya; ganti hanya data spesifik "
+                        "(nama, NIM, instansi, tanggal, dll) dengan data permohonan saat ini:\n"
+                        + clean[:2000]
+                    )
+        except Exception:
+            return ""
+        return ""
 
     @classmethod
     def _sanitize_schema_node(cls, node: Any) -> Any:

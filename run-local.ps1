@@ -21,9 +21,16 @@ if (-not (Test-Path $VenvPython)) {
 }
 Push-Location $BackendDir
 & $VenvPython manage.py migrate --noinput
-& $VenvPython manage.py seed_data
+& $VenvPython manage.py seed_surat
+& $VenvPython manage.py seed_master_data --skip-if-seeded
 Pop-Location
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$BackendDir'; `$env:DEBUG='True'; Remove-Item Env:DATABASE_URL,Env:REDIS_URL -ErrorAction SilentlyContinue; & '$VenvPython' manage.py runserver 127.0.0.1:8000"
+# Tunggu backend siap agar frontend/desktop tidak kena ECONNREFUSED saat startup
+Write-Host "[ASURA] Menunggu backend siap di 127.0.0.1:8000 ..." -ForegroundColor Yellow
+for ($i = 0; $i -lt 60; $i++) {
+    if ((Test-NetConnection -ComputerName 127.0.0.1 -Port 8000 -WarningAction SilentlyContinue -InformationLevel Quiet)) { break }
+    Start-Sleep -Seconds 1
+}
 if ($Web) {
     if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
         Push-Location $FrontendDir

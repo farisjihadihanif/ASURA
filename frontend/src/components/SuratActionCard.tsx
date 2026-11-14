@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+﻿import React, { useRef, useState } from 'react';
 import {
   CheckCircle2,
   Clock,
@@ -8,9 +8,10 @@ import {
   FileText,
   AlertCircle,
   Loader2,
+  PenTool,
 } from 'lucide-react';
 import suratService from '../services/suratService';
-import { extractErrorMessage } from '../services/api';
+import api, { extractErrorMessage } from '../services/api';
 import type { SuratRequestDetail } from '../types';
 interface SuratActionCardProps {
   suratRequest: SuratRequestDetail;
@@ -29,9 +30,7 @@ async function dispatchPrintViaAgentOrBrowser(requestId: number): Promise<string
       const data = await res.json();
       return `Dokumen dicetak otomatis ke printer (${data.deviceName || 'Printer Default'}) oleh ASURA Agent.`;
     }
-  } catch {
-    // Fallback jika ASURA Desktop Agent sedang tidak berjalan
-  }
+  } catch {}
   const blobUrl = await suratService.fetchPdfBlobUrl(requestId);
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
@@ -60,9 +59,31 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
   const [recipientEmail, setRecipientEmail] = useState(
     suratRequest.target_destination_address || defaultEmail
   );
-  const [busyAction, setBusyAction] = useState<'email' | 'print' | null>(null);
+  const [busyAction, setBusyAction] = useState<'email' | 'print' | 'sign' | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const isApprovedOrDone = ['APPROVED', 'SENT', 'PRINTED'].includes(suratRequest.status);
+  const sigInputRef = useRef<HTMLInputElement | null>(null);
+  const isCustomSurat = Boolean(suratRequest.kode_surat && suratRequest.kode_surat.toUpperCase().startsWith('CUSTOM'));
+  const isApprovedOrDone = isCustomSurat || ['APPROVED', 'SENT', 'PRINTED'].includes(suratRequest.status);
+  const handleUploadMySignature = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusyAction('sign');
+    setFeedback(null);
+    try {
+      const formData = new FormData();
+      formData.append('signature_image', file);
+      await api.post(`/api/surat/requests/${suratRequest.id}/upload-signature/`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setFeedback({ type: 'ok', text: 'Tanda tangan kamu berhasil dipasang ke dokumen PDF.' });
+      await onUpdated();
+    } catch (err) {
+      setFeedback({ type: 'err', text: extractErrorMessage(err, 'Gagal mengunggah gambar tanda tangan.') });
+    } finally {
+      setBusyAction(null);
+      if (sigInputRef.current) sigInputRef.current.value = '';
+    }
+  };
   const handleSendEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!recipientEmail.trim()) return;
@@ -98,10 +119,10 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
       <div className="flex items-start justify-between gap-3">
         <div>
           <span className="text-[10px] font-bold uppercase tracking-wider text-[#d76b3e]">
-            Status Permohonan Surat
+            {isCustomSurat ? 'Surat Custom Mandiri (TTD Pemohon)' : 'Status Permohonan Surat'}
           </span>
           <h4 className="text-sm font-bold text-[#27211e] mt-0.5">{suratRequest.nama_surat}</h4>
-          {suratRequest.nomor_surat_resmi && (
+          {suratRequest.nomor_surat_resmi && !isCustomSurat && (
             <p className="text-xs font-mono text-[#857870] mt-0.5">
               Nomor: {suratRequest.nomor_surat_resmi}
             </p>
@@ -113,18 +134,26 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
               ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
               : suratRequest.status === 'REJECTED'
               ? 'bg-rose-50 text-rose-700 border border-rose-200'
+              : suratRequest.status === 'REVISION_REQUIRED'
+              ? 'bg-amber-50 text-amber-700 border border-amber-200'
               : 'bg-[#fbf5f0] text-[#d76b3e] border border-[#eadfd7]'
           }`}
         >
-          {isApprovedOrDone ? (
-            <CheckCircle2 className="w-3.5 h-3.5" />
-          ) : (
-            <Clock className="w-3.5 h-3.5" />
-          )}
-          {suratRequest.status}
+          {isApprovedOrDone ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Clock className="w-3.5 h-3.5" />}
+          {isCustomSurat
+            ? 'SIAP DIGUNAKAN'
+            : suratRequest.status === 'REVISION_REQUIRED'
+            ? 'PERLU REVISI'
+            : suratRequest.status}
         </span>
       </div>
-      {!isApprovedOrDone && suratRequest.status !== 'REJECTED' && (
+      {suratRequest.status === 'REVISION_REQUIRED' && (
+        <p className="text-xs text-amber-700 mt-2.5 leading-relaxed">
+          Dosen meminta revisi. Balas di chat ini dengan perbaikan yang kamu inginkan (atau tanya ASURA apa yang
+          perlu diubah), lalu ketik <strong>&quot;ajukan ulang&quot;</strong> agar surat dikirim kembali ke dosen.
+        </p>
+      )}
+      {!isApprovedOrDone && suratRequest.status !== 'REJECTED' && suratRequest.status !== 'REVISION_REQUIRED' && (
         <p className="text-xs text-[#857870] mt-2.5 leading-relaxed">
           Permohonan sedang menunggu persetujuan (ACC) dari dosen. Setelah di-ACC, pilihan untuk
           mengirim ke <strong className="text-[#27211e]">Email</strong> atau mencetak ke{' '}
@@ -134,9 +163,33 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
       {isApprovedOrDone && (
         <div className="mt-3 pt-3 border-t border-[#eadfd7] space-y-3">
           <p className="text-xs text-[#27211e] font-medium">
-            Surat sudah di-ACC dosen. Pilih tindakan selanjutnya:
+            {isCustomSurat
+              ? 'Surat custom selesai disusun atas namamu sendiri. Pilih tindakan:'
+              : 'Surat sudah di-ACC dosen. Pilih tindakan selanjutnya:'}
           </p>
+          <input
+            ref={sigInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            onChange={(e) => void handleUploadMySignature(e)}
+          />
           <div className="flex flex-wrap items-center gap-2">
+            {isCustomSurat && (
+              <button
+                type="button"
+                onClick={() => sigInputRef.current?.click()}
+                disabled={busyAction !== null}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[#d76b3e] bg-[#fbf5f0] hover:bg-[#f3e6dc] text-[#b85328] text-xs font-semibold transition cursor-pointer disabled:opacity-60"
+              >
+                {busyAction === 'sign' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <PenTool className="w-3.5 h-3.5" />
+                )}
+                Upload TTD Saya
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowEmailForm((prev) => !prev)}
@@ -197,9 +250,7 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
       {feedback && (
         <div
           className={`mt-2.5 flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl ${
-            feedback.type === 'ok'
-              ? 'bg-emerald-50 text-emerald-700'
-              : 'bg-rose-50 text-rose-700'
+            feedback.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
           }`}
         >
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />

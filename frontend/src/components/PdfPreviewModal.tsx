@@ -54,6 +54,15 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({ requestId, onC
     setPrintSuccess(null);
     onClose();
   };
+  useEffect(() => {
+    if (!requestId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestId]);
   if (!requestId) return null;
   const handleDirectPrint = async () => {
     setPrinting(true);
@@ -84,8 +93,21 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({ requestId, onC
       setPrinting(false);
     }
   };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
-    <div className="fixed inset-0 z-50 bg-[#27211e]/50 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-50 bg-[#27211e]/50 backdrop-blur-xs flex items-center justify-center p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) handleClose();
+      }}
+    >
       <div className="bg-white rounded-2xl w-full max-w-4xl h-[86vh] flex flex-col overflow-hidden shadow-2xl border border-[#eadfd7]">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#eadfd7] bg-[#fbf5f0]">
           <span className="text-xs font-bold text-[#27211e]">Pratinjau Dokumen Resmi ASURA</span>

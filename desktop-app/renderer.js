@@ -5,6 +5,7 @@ const SUBMIT_TRIGGER_PHRASES = new Set([
   'ajukan ulang',
   'ajukan sekarang',
   'kirim ke dosen',
+  'buat surat custom',
   'lanjut',
   'submit',
 ]);
@@ -22,6 +23,9 @@ const state = {
   lastMessagesSig: '',
   lastActionSig: '',
 };
+function isCustomIntent(code) {
+  return String(code || '').toUpperCase().startsWith('CUSTOM');
+}
 function canSubmitNow() {
   return Boolean(
     state.isReadyToDraft &&
@@ -69,18 +73,48 @@ function formatRichBubbleHtml(rawText) {
 function appendBubble(text, sender = 'assistant') {
   const div = document.createElement('div');
   div.className = `bubble ${sender}`;
-  div.style.animation = 'none';
-  div.style.transition = 'none';
   div.innerHTML = formatRichBubbleHtml(text);
   $('messages-box').appendChild(div);
   $('messages-box').scrollTop = $('messages-box').scrollHeight;
 }
+async function uploadCustomSignatureDesktop(requestId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/webp';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        await window.asuraAPI.api.call({
+          method: 'POST',
+          endpoint: `/api/surat/requests/${requestId}/upload-signature/`,
+          body: { signature_data_uri: String(reader.result || '') },
+        });
+        appendBubble('Tanda tanganmu berhasil dipasang ke dokumen PDF.');
+      } catch (err) {
+        appendBubble(`Gagal memasang tanda tangan: ${err.message}`);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+  if (window.asuraAPI?.window?.setAutoCloseLock) { void window.asuraAPI.window.setAutoCloseLock(true); }
+  window.addEventListener('focus', () => { if (window.asuraAPI?.window?.setAutoCloseLock) { setTimeout(() => void window.asuraAPI.window.setAutoCloseLock(false), 300); } }, { once: true });
+  input.click();
+}
 function renderActionBar(options = [], force = false) {
+  const reqIsCustom = isCustomIntent(state.latestRequest?.kode_surat);
+  const reqReady =
+    state.latestRequest &&
+    (reqIsCustom || ['APPROVED', 'SENT', 'PRINTED'].includes(state.latestRequest.status));
   const actionSig = JSON.stringify({
     options,
     canSubmit: canSubmitNow(),
+    intent: state.intent,
     reqId: state.latestRequest?.id || null,
     reqStatus: state.latestRequest?.status || null,
+    reqIsCustom,
     showEmailBox: state.showEmailBox,
     isPrinting: state.isPrinting,
   });
@@ -108,11 +142,21 @@ function renderActionBar(options = [], force = false) {
     const submitBtn = document.createElement('button');
     submitBtn.type = 'button';
     submitBtn.className = 'chip-btn primary-chip';
-    submitBtn.textContent = 'Ajukan Surat ke Dosen';
+    submitBtn.textContent = isCustomIntent(state.intent)
+      ? 'Buat Surat Custom'
+      : 'Ajukan Surat ke Dosen';
     submitBtn.onclick = () => void submitSuratToLecturer();
     row.appendChild(submitBtn);
   }
-  if (state.latestRequest && ['APPROVED', 'SENT', 'PRINTED'].includes(state.latestRequest.status)) {
+  if (reqReady) {
+    if (reqIsCustom) {
+      const sigBtn = document.createElement('button');
+      sigBtn.type = 'button';
+      sigBtn.className = 'chip-btn';
+      sigBtn.textContent = 'Upload TTD Saya';
+      sigBtn.onclick = () => void uploadCustomSignatureDesktop(state.latestRequest.id);
+      row.appendChild(sigBtn);
+    }
     const emailBtn = document.createElement('button');
     emailBtn.type = 'button';
     emailBtn.className = 'chip-btn primary-chip';
@@ -219,6 +263,7 @@ async function openPopup() {
   await window.asuraAPI.window.setMode(true);
 }
 async function closePopup() {
+  $('header-dropdown').hidden = true;
   $('popup-panel').hidden = true;
   $('mascot-btn').hidden = false;
   await window.asuraAPI.window.closePopup();
@@ -227,10 +272,11 @@ function applyAuthState(user) {
   state.user = user;
   const loggedIn = Boolean(user);
   $('view-login').hidden = loggedIn;
+  $('view-register').hidden = true;
   $('view-chat').hidden = !loggedIn;
-  $('btn-history').hidden = !loggedIn;
-  $('btn-new-chat').hidden = !loggedIn;
+  $('btn-menu-dropdown').hidden = !loggedIn;
   $('btn-logout').hidden = !loggedIn;
+  $('header-dropdown').hidden = true;
   if (loggedIn) {
     $('user-banner').textContent = `${user.nama} (${user.nip_nim})`;
     if (!state.threadId) {
@@ -253,6 +299,7 @@ async function initNewThread() {
   $('messages-box').innerHTML = '';
   $('action-bar').innerHTML = '';
   $('history-drawer').hidden = true;
+  $('header-dropdown').hidden = true;
   state.intent = null;
   state.slots = {};
   state.isReadyToDraft = false;
@@ -270,7 +317,7 @@ async function initNewThread() {
     });
     state.threadId = res.thread_id;
     appendBubble(
-      'Halo, saya ASURA. Sebutkan surat akademik yang ingin kamu buat (termasuk surat custom), lalu saya bantu susun dan teruskan ke dosen untuk ACC.'
+      'Halo, saya ASURA. Sebutkan surat kampus atau surat custom (pribadi) yang ingin kamu buat.'
     );
     state.lastMessagesSig = 'init';
   } catch (err) {
@@ -299,7 +346,8 @@ async function refreshThreadState(forceRender = false) {
     if (
       newStatus === 'APPROVED' &&
       state.lastKnownStatus &&
-      state.lastKnownStatus !== 'APPROVED'
+      state.lastKnownStatus !== 'APPROVED' &&
+      !isCustomIntent(state.latestRequest?.kode_surat)
     ) {
       await window.asuraAPI.notifications.show({
         title: 'Surat Di-ACC Dosen',
@@ -353,7 +401,7 @@ async function submitSuratToLecturer() {
     });
     await refreshThreadState(true);
   } catch (err) {
-    appendBubble(`Gagal mengajukan surat: ${err.message}`);
+    appendBubble(`Gagal memproses surat: ${err.message}`);
   }
 }
 async function sendEmailInline(requestId, targetEmail) {
@@ -394,17 +442,167 @@ async function printApprovedSurat(requestId) {
 document.addEventListener('DOMContentLoaded', async () => {
   $('mascot-btn').addEventListener('click', () => void openPopup());
   $('btn-close').addEventListener('click', () => void closePopup());
-  $('btn-new-chat').addEventListener('click', () => void initNewThread());
-  $('btn-history').addEventListener('click', async () => {
+  $('btn-minimize').addEventListener('click', () => void closePopup());
+  try {
+    const cfg = await window.asuraAPI.config.get();
+    if (!cfg?.demoAccounts) $('btn-fill-demo').hidden = true;
+  } catch {}
+  async function enterAccount(userOrNull) {
+    state.threadId = null;
+    $('account-list').hidden = true;
+    $('header-dropdown').hidden = true;
+    applyAuthState(userOrNull);
+    if (!userOrNull) {
+      $('input-nim').value = '';
+      $('input-pass').value = '';
+      $('input-nim').focus();
+    }
+  }
+  $('menu-switch').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const box = $('account-list');
+    if (!box.hidden) { box.hidden = true; return; }
+    box.innerHTML = '';
+    let accounts = [];
+    try { accounts = await window.asuraAPI.auth.listAccounts(); } catch {}
+    accounts.forEach((a) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dropdown-item';
+      btn.textContent = `${a.active ? '✓ ' : ''}${a.nama} (${a.nip_nim})`;
+      btn.disabled = a.active;
+      btn.addEventListener('click', async () => {
+        try {
+          const u = await window.asuraAPI.auth.switchAccount(a.nip_nim);
+          await enterAccount(u);
+        } catch (err) {
+          await enterAccount(null);
+          $('login-error').textContent = err.message;
+          $('login-error').hidden = false;
+        }
+      });
+      box.appendChild(btn);
+    });
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'dropdown-item';
+    add.textContent = '+ Tambah akun lain';
+    add.addEventListener('click', async () => {
+      await window.asuraAPI.auth.addAccount();
+      await enterAccount(null);
+    });
+    box.appendChild(add);
+    box.hidden = false;
+  });
+  if (window.asuraAPI?.window?.onAutoCollapsed) { window.asuraAPI.window.onAutoCollapsed(() => { $('header-dropdown').hidden = true; $('popup-panel').hidden = true; $('mascot-btn').hidden = false; }); }
+  // Dropdown Menu (Gabungan Chat Baru + Riwayat Chat)
+  $('btn-menu-dropdown').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('header-dropdown').hidden = !$('header-dropdown').hidden;
+  });
+  $('menu-new-chat').addEventListener('click', () => {
+    $('header-dropdown').hidden = true;
+    void initNewThread();
+  });
+  $('menu-history').addEventListener('click', async () => {
+    $('header-dropdown').hidden = true;
     const drawer = $('history-drawer');
     drawer.hidden = !drawer.hidden;
     if (!drawer.hidden) {
       await loadHistoryList();
     }
   });
+  $('btn-close-history').addEventListener('click', () => {
+    $('history-drawer').hidden = true;
+  });
+  document.addEventListener('click', (e) => {
+    const menuBtn = $('btn-menu-dropdown');
+    if (!$('header-dropdown').hidden && !$('header-dropdown').contains(e.target) && !menuBtn.contains(e.target)) {
+      $('header-dropdown').hidden = true;
+    }
+    const drawer = $('history-drawer');
+    if (!drawer.hidden && !drawer.contains(e.target) && !$('header-dropdown').contains(e.target)) {
+      drawer.hidden = true;
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      $('header-dropdown').hidden = true;
+      $('history-drawer').hidden = true;
+    }
+  });
   $('btn-fill-demo').addEventListener('click', () => {
     $('input-nim').value = 'INF24001';
     $('input-pass').value = '12345678';
+  });
+  let regProfile = null;
+  function resetRegisterForm() {
+    regProfile = null;
+    $('reg-profile').hidden = true;
+    $('reg-fields').style.display = 'none';
+    $('btn-register-submit').style.display = 'none';
+    $('register-error').hidden = true;
+  }
+  function showRegister(show) {
+    $('view-login').hidden = show;
+    $('view-register').hidden = !show;
+    if (show) resetRegisterForm();
+  }
+  $('btn-show-register').addEventListener('click', () => showRegister(true));
+  $('btn-back-login').addEventListener('click', () => showRegister(false));
+  $('reg-nim').addEventListener('input', resetRegisterForm);
+  async function checkNim() {
+    resetRegisterForm();
+    const nim = $('reg-nim').value.trim();
+    if (nim.length < 4) {
+      $('register-error').textContent = 'Masukkan NIM/NIP terlebih dahulu.';
+      $('register-error').hidden = false;
+      return;
+    }
+    $('btn-reg-check').disabled = true;
+    try {
+      const p = await window.asuraAPI.auth.registerLookup(nim);
+      regProfile = p;
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+      const peran = p.role === 'STUDENT' ? 'Mahasiswa' : 'Dosen' + (p.jabatan ? ' - ' + p.jabatan : '');
+      $('reg-profile').innerHTML =
+        '<div style="font-size:12px;line-height:1.5;border:1px solid #a7f3d0;background:#ecfdf5;border-radius:12px;padding:10px;">' +
+        '<b>Data ditemukan di master kampus</b><br/>Nama: <b>' + esc(p.nama) + '</b><br/>Peran: ' + esc(peran) +
+        '<br/>Fakultas: ' + esc(p.fakultas) + '<br/>Prodi: ' + esc(p.prodi) +
+        (p.role === 'STUDENT' ? '<br/>Angkatan / Semester: ' + esc(p.angkatan) + ' / ' + esc(p.semester_aktif) : '') + '</div>';
+      $('reg-profile').hidden = false;
+      $('reg-fields').style.display = 'flex';
+      $('btn-register-submit').style.display = 'block';
+    } catch (err) {
+      $('register-error').textContent = err.message || 'NIM/NIP tidak ditemukan di data kampus.';
+      $('register-error').hidden = false;
+    } finally {
+      $('btn-reg-check').disabled = false;
+    }
+  }
+  $('btn-reg-check').addEventListener('click', () => void checkNim());
+  $('register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!regProfile) {
+      void checkNim();
+      return;
+    }
+    $('register-error').hidden = true;
+    $('btn-register-submit').disabled = true;
+    try {
+      const user = await window.asuraAPI.auth.register({
+        nip_nim: regProfile.nip_nim,
+        email: $('reg-email').value.trim(),
+        password: $('reg-pass').value,
+      });
+      $('view-register').hidden = true;
+      applyAuthState(user);
+    } catch (err) {
+      $('register-error').textContent = err.message || 'Pendaftaran gagal.';
+      $('register-error').hidden = false;
+    } finally {
+      $('btn-register-submit').disabled = false;
+    }
   });
   $('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -440,13 +638,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const savedUser = await window.asuraAPI.auth.getUser();
   applyAuthState(savedUser);
   state.pollTimer = window.setInterval(() => {
-    if (
-      state.user &&
-      state.threadId &&
-      state.latestRequest &&
-      !['SENT', 'PRINTED'].includes(state.latestRequest.status)
-    ) {
+    // Sinkron realtime dengan web: selama popup terbuka dan user login
+    if (state.user && state.threadId && !$('popup-panel').hidden && !document.hidden) {
       void refreshThreadState(false);
     }
-  }, 3000);
+  }, 2500);
 });
+

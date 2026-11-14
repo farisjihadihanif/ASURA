@@ -4,67 +4,59 @@ from accounts.models import Lecturer
 from ..models import SuratRequest, SuratApproval, SuratAttachment, SuratAuditLog, ApprovalRule
 from .notifications import notify_user
 
+def resolve_official_approver(student, kode_surat=None):
+    """Penyetuju surat kampus berdasarkan jabatan (tanpa admin):
+    surat keterangan aktif kuliah dan UKT -> Dekan; semua surat lain -> Ketua Program Studi.
+    Bila jabatan terkait kosong, jatuh ke jabatan lainnya."""
+    from .campus_catalog import DEKAN_SURAT_CODES
+
+    prodi = getattr(student, 'prodi', None)
+    fakultas = getattr(student, 'fakultas', None)
+    kaprodi = getattr(prodi, 'kaprodi', None)
+    dekan = getattr(fakultas, 'dekan', None)
+    primary, secondary = (dekan, kaprodi) if str(kode_surat or '').upper() in DEKAN_SURAT_CODES else (kaprodi, dekan)
+    return primary or secondary or getattr(student, 'dosen_pembimbing_akademik', None)
+
+
 def create_approval_workflow_for_request(surat_req, student):
     """
-    Fungsi Helper (DRY) untuk membuat antrean SuratApproval berjenjang
-    berdasarkan ApprovalRule untuk sebuah SuratRequest yang sudah ada.
-    Mendukung Non-Destructive Interceptor untuk 1-step approval saat mode demo aktif.
+    Membuat antrean SuratApproval untuk sebuah SuratRequest.
+    - Bila ApprovalRule untuk jenis surat diatur di database, ikuti rule berjenjang tersebut.
+    - Bila tidak, satu langkah: Dekan untuk surat aktif kuliah/UKT, Ketua Program Studi untuk surat lainnya.
     """
+    if surat_req.approvals.exists():
+        return  # idempotent: antrean sudah dibuat (mis. oleh hook penyimpanan)
     surat_type = surat_req.kode_surat
-    kode_surat_str = getattr(surat_type, 'kode_surat', str(surat_type))
-
-    # INTERCEPTOR DEMO ONE-STEP APPROVAL:
-    # Memangkas birokrasi menjadi 1 langkah langsung ke akun Dr. Joel Evans, M.T.
-    # khusus target surat demo (SR-MAG dan SR-BEA) tanpa merusak tabel approval_rules.
-    demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', True)
-    demo_target_surat = getattr(settings, 'DEMO_TARGET_SURAT', ['SR-MAG', 'SR-BEA'])
-    demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
-
-    if demo_enabled:
-        joel_evans = (
-            Lecturer.objects.filter(user__nip_nim=demo_approver_nip).first()
-            or Lecturer.objects.filter(user__nama__icontains="Joel Evans").first()
-        )
-        if joel_evans:
-            SuratApproval.objects.create(
-                surat_request=surat_req,
-                step_order=1,
-                approver=joel_evans,
-                status='PENDING'
-            )
-            return
-
     rules = ApprovalRule.objects.filter(kode_surat=surat_type).order_by('step_order')
 
     if not rules.exists():
-        # Fallback default jika rule belum diatur: arahkan ke Dosen Pembimbing Akademik (DPA)
-        default_approver = student.dosen_pembimbing_akademik
-        if default_approver:
+        approver = resolve_official_approver(student, getattr(surat_type, "kode_surat", surat_type))
+        if approver:
             SuratApproval.objects.create(
                 surat_request=surat_req,
                 step_order=1,
-                approver=default_approver,
-                status='PENDING' # Gunakan string langsung jika enum belum siap di file ini
+                approver=approver,
+                status='PENDING',
             )
-    else:
-        # Daftarkan antrean approval sesuai step rule
-        for rule in rules:
-            approver_obj = None
-            if rule.approval_role == 'DPA':
-                approver_obj = student.dosen_pembimbing_akademik
-            elif rule.approval_role == 'KAPRODI':
-                approver_obj = student.prodi.kaprodi
-            elif rule.approval_role == 'DEKAN':
-                approver_obj = student.fakultas.dekan
+        return
 
-            if approver_obj:
-                SuratApproval.objects.create(
-                    surat_request=surat_req,
-                    step_order=rule.step_order,
-                    approver=approver_obj,
-                    # Step 1 langsung PENDING (aktif), sisanya WAITING
-                    status='PENDING' if rule.step_order == 1 else 'WAITING'
-                )
+    for rule in rules:
+        approver_obj = None
+        if rule.approval_role == 'DPA':
+            approver_obj = student.dosen_pembimbing_akademik
+        elif rule.approval_role == 'KAPRODI':
+            approver_obj = student.prodi.kaprodi
+        elif rule.approval_role == 'DEKAN':
+            approver_obj = student.fakultas.dekan
+
+        if approver_obj:
+            SuratApproval.objects.create(
+                surat_request=surat_req,
+                step_order=rule.step_order,
+                approver=approver_obj,
+                status='PENDING' if rule.step_order == 1 else 'WAITING',
+            )
+
 
 def handle_manual_approval_surat(student, surat_type, payload_data, attachments_files=None):
     """

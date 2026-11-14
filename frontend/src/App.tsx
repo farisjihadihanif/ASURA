@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
 import StudentChatPage from "./pages/StudentChatPage";
 import LecturerApprovalsPage from "./pages/LecturerApprovalsPage";
 import VerifySuratPage from "./pages/VerifySuratPage";
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
           <Route path="/verify" element={<VerifySuratPage />} />
           <Route path="/verify/:token" element={<VerifySuratPage />} />
 

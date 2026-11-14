@@ -13,6 +13,25 @@ from .models import ChatMessage, ChatThread, SuratRequest, SuratStatus
 from .services.email_service import send_surat_via_gmail_admin
 from .services.pdf_generator_safe import generate_and_save_official_pdf, clean_letter_body_text
 from .services.signature_storage import resolve_signature_path_and_uri, humanize_jabatan, clean_fakultas_name
+def _resolve_signer(surat_req: SuratRequest):
+    """(nama, nip, jabatan) penandatangan: override payload -> dosen yang meng-ACC -> pejabat resmi mahasiswa."""
+    payload = surat_req.payload_data or {}
+    lec = None
+    approved = surat_req.approvals.filter(status="APPROVED").select_related("approver__user").order_by("-step_order").first()
+    if approved:
+        lec = approved.approver
+    if lec is None:
+        st = surat_req.student
+        lec = getattr(getattr(st, "prodi", None), "kaprodi", None) or getattr(getattr(st, "fakultas", None), "dekan", None)
+    user = getattr(lec, "user", None)
+    jab = (getattr(lec, "jabatan_struktural", None) or [""])[0] if lec else ""
+    return (
+        payload.get("_signer_nama") or getattr(user, "nama", "") or "Pejabat Penandatangan",
+        payload.get("_signer_nip") or getattr(user, "nip_nim", "") or "-",
+        payload.get("_signer_jabatan") or jab,
+    )
+
+
 def _build_official_a4_html(surat_req: SuratRequest) -> str:
     student = surat_req.student
     prodi_nama = getattr(getattr(student, "prodi", None), "nama_prodi", None) or "Teknik Informatika"
@@ -35,6 +54,10 @@ def _build_official_a4_html(surat_req: SuratRequest) -> str:
     ) or f"<p style='text-align: justify;'>{isi_html}</p>"
     tanggal_surat = timezone.now().strftime("%d %B %Y")
     qr_url = surat_req.qr_verification_code or nomor_resmi
+    from .services.pdf_generator_safe import _build_qr_img_html
+    qr_img_html = _build_qr_img_html(qr_url)
+    qr_token = str(qr_url).rstrip("/").split("/")[-1][:8].upper()
+    signer_nama, signer_nip, signer_jabatan = _resolve_signer(surat_req)
     return f"""<!DOCTYPE html>
 <html lang="id">
 <head>
@@ -70,9 +93,9 @@ def _build_official_a4_html(surat_req: SuratRequest) -> str:
   </div>
   <p style="margin: 0 0 6px 0;">Yang bertanda tangan di bawah ini:</p>
   <table style="margin-bottom: 12px;">
-    <tr><td style="width: 155px; padding: 2px 0;">Nama</td><td style="width: 14px;">:</td><td><b>Dr. Joel Evans, M.T.</b></td></tr>
-    <tr><td style="padding: 2px 0;">NIP</td><td>:</td><td>198001012005011001</td></tr>
-    <tr><td style="padding: 2px 0;">Jabatan</td><td>:</td><td>Dekan Fakultas {fakultas_nama}</td></tr>
+    <tr><td style="width: 155px; padding: 2px 0;">Nama</td><td style="width: 14px;">:</td><td><b>{signer_nama}</b></td></tr>
+    <tr><td style="padding: 2px 0;">NIP</td><td>:</td><td>{signer_nip}</td></tr>
+    <tr><td style="padding: 2px 0;">Jabatan</td><td>:</td><td>{humanize_jabatan(signer_jabatan, fakultas_nama)}</td></tr>
     <tr><td style="padding: 2px 0;">Instansi</td><td>:</td><td>UIN Sunan Kalijaga Yogyakarta</td></tr>
   </table>
   <p style="margin: 0 0 6px 0;">Dengan ini menerangkan bahwa:</p>
@@ -90,18 +113,19 @@ def _build_official_a4_html(surat_req: SuratRequest) -> str:
   <table style="margin-top: 10px;">
     <tr>
       <td style="width: 48%; padding-right: 16px; vertical-align: bottom;">
-        <div style="border: 1px solid #888; padding: 8px; font-size: 8.5pt; color: #333; background: #fafafa;">
-          <b>TERVERIFIKASI ELEKTRONIK (ASURA)</b><br/>
-          Dokumen resmi diterbitkan melalui Sistem Persuratan ASURA.<br/>
-          Kode Verifikasi: {qr_url}
+        <div style="font-size: 7.5pt; color: #333;">
+          {qr_img_html}<br/>
+          <b>Ditandatangani secara elektronik (ASURA)</b><br/>
+          Pindai QR untuk memeriksa keaslian.<br/>
+          Kode: {qr_token}
         </div>
       </td>
       <td style="width: 52%; padding-left: 24px; text-align: left;">
         <div>Yogyakarta, {tanggal_surat}</div>
-        <div>{humanize_jabatan((surat_req.payload_data or {{}}).get("_signer_jabatan") or "", fakultas_nama)},</div>
+        <div>{humanize_jabatan(signer_jabatan, fakultas_nama)},</div>
         {(f"<div style='margin:6px 0;'><img src='{resolve_signature_path_and_uri(surat_id=surat_req.id, context_data=surat_req.payload_data)[1]}' style='height:92px;max-width:230px;width:auto;' /></div>" if resolve_signature_path_and_uri(surat_id=surat_req.id, context_data=surat_req.payload_data)[1] else "<br/><br/><br/>")}
-        <div style="font-weight: bold; text-decoration: underline;">{(surat_req.payload_data or {{}}).get("_signer_nama") or "Dr. Joel Evans, M.T."}</div>
-        <div style="font-size: 10.5pt;">NIP. {(surat_req.payload_data or {{}}).get("_signer_nip") or "198001012005011001"}</div>
+        <div style="font-weight: bold; text-decoration: underline;">{signer_nama}</div>
+        <div style="font-size: 10.5pt;">NIP. {signer_nip}</div>
       </td>
     </tr>
   </table>
@@ -125,6 +149,8 @@ def _ensure_pdf_on_disk(surat_req: SuratRequest) -> str:
             {
                 "id": surat_req.id,
                 "surat_request_id": surat_req.id,
+                "kode_surat": surat_req.kode_surat.kode_surat,
+                "is_custom_personal": str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"),
                 "nomor_surat": nomor_resmi,
                 "nama_surat": surat_req.kode_surat.nama_surat,
                 "nama_mahasiswa": student.user.nama,
@@ -137,6 +163,9 @@ def _ensure_pdf_on_disk(surat_req: SuratRequest) -> str:
                 "isi_surat": effective_content,
                 "payload": surat_req.payload_data or {},
                 "qr_verification_code": surat_req.qr_verification_code or nomor_resmi,
+                "nama_penandatangan": _resolve_signer(surat_req)[0],
+                "nip_penandatangan": _resolve_signer(surat_req)[1],
+                "jabatan_penandatangan": _resolve_signer(surat_req)[2],
             }
         )
     return target_pdf
@@ -254,6 +283,63 @@ class SuratDeliverEmailAPIView(APIView):
             {
                 "status": "SENT",
                 "message": f"Dokumen berhasil dikirim ke {recipient_email}.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+class SuratUploadSignatureAPIView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+    def post(self, request, pk: int):
+        from .services.signature_storage import save_request_signature_file
+        from .services.pdf_generator_safe import generate_and_save_official_pdf
+        surat_req = SuratRequest.objects.select_related(
+            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat"
+        ).filter(pk=pk).first()
+        if not surat_req:
+            return Response({"error": "Surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        sig_file = request.FILES.get("signature_image") or request.FILES.get("file")
+        data_uri = str(request.data.get("signature_data_uri") or "")
+        saved_path = save_request_signature_file(
+            surat_id=surat_req.id,
+            uploaded_file=sig_file,
+            data_uri=data_uri,
+        )
+        if not saved_path:
+            return Response(
+                {"error": "File gambar tanda tangan tidak valid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        pdata = dict(surat_req.payload_data or {})
+        pdata["_manual_signature_path"] = saved_path
+        surat_req.payload_data = pdata
+        surat_req.save(update_fields=["payload_data"])
+        st = surat_req.student
+        is_custom = str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM")
+        generate_and_save_official_pdf({
+            "id": surat_req.id,
+            "surat_request_id": surat_req.id,
+                "kode_surat": surat_req.kode_surat.kode_surat,
+                "is_custom_personal": str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"),
+            "kode_surat": surat_req.kode_surat.kode_surat,
+            "is_custom_personal": is_custom,
+            "nomor_surat": surat_req.nomor_surat_resmi or f"CUSTOM/{surat_req.id:03d}/2026",
+            "nama_surat": pdata.get("judul_surat") or surat_req.kode_surat.nama_surat,
+            "nama_mahasiswa": st.user.nama,
+            "nim": st.nim,
+            "program_studi": getattr(getattr(st, "prodi", None), "nama_prodi", None) or "Informatika",
+            "fakultas": getattr(getattr(st, "fakultas", None), "nama_fakultas", None) or "Teknik",
+            "semester_aktif": getattr(st, "semester_aktif", "-"),
+            "tahun_akademik": getattr(st, "tahun_akademik", "-"),
+            "final_approved_content": surat_req.final_approved_content or surat_req.ai_original_draft or "",
+            "isi_surat": surat_req.final_approved_content or surat_req.ai_original_draft or "",
+            "payload": pdata,
+            "qr_verification_code": surat_req.qr_verification_code or f"ASURA-{surat_req.id}",
+        })
+        return Response(
+            {
+                "status": "OK",
+                "message": "Tanda tangan berhasil dipasang ke dokumen PDF.",
             },
             status=status.HTTP_200_OK,
         )

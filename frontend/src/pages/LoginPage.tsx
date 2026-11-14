@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Sparkles,
   Lock,
@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { extractErrorMessage } from "../services/api";
+import authService from "../services/authService";
 
 export const LoginPage: React.FC = () => {
   const { login } = useAuth();
@@ -18,6 +19,8 @@ export const LoginPage: React.FC = () => {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const { switchAccount } = useAuth();
+  const recent = authService.getSavedAccounts();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,6 +62,23 @@ export const LoginPage: React.FC = () => {
         </div>
 
         <form onSubmit={(e) => void handleSubmit(e)} className="p-6 space-y-4">
+          {recent.length > 0 && (
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-[#857870] mb-2">Akun tersimpan (klik untuk langsung masuk)</p>
+              <div className="flex flex-wrap gap-2">
+                {recent.map((a) => (
+                  <button
+                    key={a.nip_nim}
+                    type="button"
+                    onClick={() => void switchAccount(a.nip_nim)}
+                    className="px-3 py-1.5 rounded-full border border-[#eadfd7] bg-[#fbf5f0] text-xs font-semibold text-[#27211e] hover:border-[#d76b3e] cursor-pointer"
+                  >
+                    {a.nama} <span className="text-[#857870] font-medium">({a.nip_nim})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div>
             <label className="block text-xs font-bold text-[#27211e] mb-1.5">
               NIM / NIP
@@ -70,7 +90,7 @@ export const LoginPage: React.FC = () => {
                 required
                 value={nipNim}
                 onChange={(e) => setNipNim(e.target.value)}
-                placeholder="Contoh: INF24001 atau 198001012005011001"
+                placeholder="NIM atau NIP"
                 className="w-full pl-10 pr-3.5 py-2.5 text-sm rounded-xl border border-[#eadfd7] bg-[#fffdfa] text-[#27211e] focus:outline-none focus:border-[#d76b3e]"
               />
             </div>
@@ -114,28 +134,13 @@ export const LoginPage: React.FC = () => {
             )}
           </button>
 
-          <div className="pt-2 border-t border-[#eadfd7] flex items-center justify-between text-[11px] text-[#857870]">
-            <button
-              type="button"
-              onClick={() => {
-                setNipNim("INF24001");
-                setPassword("12345678");
-              }}
-              className="hover:text-[#d76b3e] underline cursor-pointer"
-            >
-              Isi Demo Mahasiswa
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setNipNim("198001012005011001");
-                setPassword("12345678");
-              }}
-              className="hover:text-[#d76b3e] underline cursor-pointer"
-            >
-              Isi Demo Dosen
-            </button>
-          </div>
+          <p className="text-center text-xs text-[#857870]">
+            Belum punya akun?{" "}
+            <Link to="/register" className="font-bold underline hover:text-[#d76b3e]">
+              Daftar
+            </Link>
+          </p>
+
         </form>
       </div>
     </div>

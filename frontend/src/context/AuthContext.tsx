@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import authService from "../services/authService";
+import type { RegisterPayload } from "../services/authService";
 import type { User } from "../types";
 
 interface AuthContextValue {
@@ -8,6 +9,9 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (nip_nim: string, password: string) => Promise<User>;
   logout: () => Promise<void>;
+  switchAccount: (nip_nim: string) => Promise<void>;
+  addAccount: () => void;
+  register: (payload: RegisterPayload) => Promise<User>;
   refreshUser: () => Promise<void>;
 }
 
@@ -55,6 +59,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     setUser(null);
   };
 
+  const goHome = (u: User) => {
+    window.location.assign(u.role === "LECTURER" ? "/approvals" : "/chat");
+  };
+
+  const switchAccount = async (nip_nim: string) => {
+    const next = await authService.switchTo(nip_nim);
+    if (next) {
+      goHome(next);
+    } else {
+      setUser(null);
+      window.location.assign("/login");
+    }
+  };
+
+  const register = async (payload: RegisterPayload): Promise<User> => {
+    const res = await authService.register(payload);
+    setUser(res.user);
+    goHome(res.user);
+    return res.user;
+  };
+
+  const addAccount = () => {
+    authService.addAccount();
+    setUser(null);
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -63,6 +93,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         isLoading,
         login,
         logout,
+        switchAccount,
+        addAccount,
+        register,
         refreshUser,
       }}
     >

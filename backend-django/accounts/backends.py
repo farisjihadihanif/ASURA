@@ -23,6 +23,8 @@ class CustomUserAuthBackend(BaseBackend):
             return None
 
         stored_password = user.password or ""
+        if not stored_password or stored_password.startswith("!"):
+            return None  # akun master data yang belum diaktivasi lewat pendaftaran
         if stored_password.startswith(('pbkdf2_', 'argon2$', 'bcrypt$', 'scrypt$')):
             is_valid = check_password(password, stored_password) or check_password(clean_password, stored_password)
         else:

@@ -251,6 +251,6 @@ TELEGRAM_BOT_TOKEN = _load_live_env_var('TELEGRAM_BOT_TOKEN')
 # ==============================================================================
 # KONFIGURASI DEMO ONE-STEP APPROVAL (NON-DESTRUCTIVE INTERCEPTOR)
 # ==============================================================================
-DEMO_ONE_STEP_APPROVAL = os.environ.get('DEMO_ONE_STEP_APPROVAL', 'True').lower() == 'true'
+DEMO_ONE_STEP_APPROVAL = os.environ.get('DEMO_ONE_STEP_APPROVAL', 'False').lower() == 'true'
 DEMO_APPROVER_NIP = os.environ.get('DEMO_APPROVER_NIP', '198001012005011001')
 DEMO_TARGET_SURAT = ['SR-MAG', 'SR-BEA']

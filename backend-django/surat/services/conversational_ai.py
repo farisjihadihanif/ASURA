@@ -35,17 +35,16 @@ def get_catalog_summary_lines() -> List[str]:
     except Exception:
         pass
     lines = []
-    for st in SuratType.objects.all().order_by("kategori", "nama_surat"):
-        if st.kode_surat == "CUSTOM-UMUM":
+    from surat.services.campus_catalog import CATALOG_CODES
+
+    for st in SuratType.objects.filter(kode_surat__in=CATALOG_CODES).order_by("kategori", "nama_surat"):
+        if str(st.kode_surat or "").upper().startswith("CUSTOM"):
             continue
-        desc = (getattr(st, "deskripsi", "") or getattr(st, "keterangan", "") or "").strip()
-        if desc:
-            lines.append(f"- {st.nama_surat} ({st.kode_surat}): {desc}")
-        else:
-            lines.append(f"- {st.nama_surat} ({st.kode_surat})")
+        lines.append(f"- {st.nama_surat} ({st.kode_surat})")
+    lines.append("- Custom (Surat pribadi/mandiri sesuai kebutuhan, seperti surat izin sakit, izin kegiatan, surat pernyataan, dll.)")
     return lines
 def generate_conversational_reply(
-    user_message: str,
+    user_message: str = "",
     history_messages: List[Dict[str, str]] = None,
     student_info: Dict[str, Any] = None,
 ) -> str:
@@ -61,35 +60,36 @@ def generate_conversational_reply(
     if history_messages:
         recent = history_messages[-8:]
         history_text = "\n".join(
-            f"{'Mahasiswa' if m.get('sender') == 'user' else 'ASURA'}: {m.get('text', '')}"
+            f"{'Mahasiswa' if m.get('sender') == 'user' else 'ASURA'}: {m.get('message') or m.get('text') or ''}"
             for m in recent
-            if m.get("text")
+            if m.get("message") or m.get("text")
         )
     mhs_ctx = ""
     if student_info:
         mhs_ctx = (
-            f"Data mahasiswa yang sedang login: Nama={student_info.get('nama', '-')}, "
+            f"Data mahasiswa: Nama={student_info.get('nama', '-')}, "
             f"NIM={student_info.get('nim', '-')}, Prodi={student_info.get('prodi', '-')}, "
             f"Semester={student_info.get('semester', '-')}."
         )
     system_instruction = (
-        "Kamu adalah ASURA, asisten persuratan akademik kampus yang cerdas, ringkas, dan membantu.\n"
+        "Kamu adalah ASURA, asisten persuratan akademik kampus yang sigap, jelas, dan membantu.\n"
         f"{mhs_ctx}\n\n"
-        "Daftar jenis surat resmi kampus yang tersedia di sistem saat ini:\n"
+        "Daftar jenis surat resmi kampus yang tersedia di sistem:\n"
         f"{catalog_text}\n\n"
         "Kemampuan tambahan penting:\n"
-        "- Selain daftar surat standar di atas, kamu JUGA BISA membuatkan SURAT CUSTOM (surat bebas sesuai kebutuhan mahasiswa, misalnya surat izin kegiatan, surat pernyataan, surat pengantar khusus, surat dispensasi, atau surat permohonan lainnya).\n"
-        "- Alur kerja: kumpulkan detail keperluan surat dari mahasiswa -> susun draf -> kirim ke dosen untuk ACC -> setelah ACC bisa dikirim ke email atau dicetak ke printer.\n\n"
-        "ATURAN GAYA BAHASA (WAJIB DIPATUHI):\n"
-        "1. Jawab langsung ke inti pertanyaan mahasiswa secara natural seperti staf akademik yang ramah dan sigap.\n"
-        "2. DILARANG KERAS menggunakan emoji atau emotikon apa pun.\n"
-        "3. DILARANG memakai kalimat pembuka template AI seperti 'Halo, saya adalah Asisten AI...', 'Tentu! Dengan senang hati...', atau 'Berikut adalah informasi yang Anda minta'.\n"
-        "4. Jika mahasiswa menanyakan jenis surat apa saja yang bisa dibuat, tampilkan daftar surat di atas secara rapi dan tegaskan bahwa kamu juga bisa membuatkan Surat Custom sesuai kebutuhan mereka."
+        "- Selain daftar surat standar di atas, kamu JUGA BISA membuatkan SURAT CUSTOM (bebas sesuai kebutuhan mahasiswa, misalnya surat izin kegiatan, surat pernyataan, surat pengantar khusus, dispensasi, atau surat permohonan lainnya).\n"
+        "- Alur surat kampus resmi: kumpulkan detail -> susun draf -> diteruskan ke pejabat kampus (kaprodi/dekan) untuk ACC -> kirim email atau cetak.\n"
+        "- Alur Surat Custom (pribadi, mis. surat sakit, surat cinta): langsung jadi tanpa persetujuan siapa pun dan TIDAK dikirim ke dosen. Jangan pernah bilang surat custom diteruskan ke dosen.\n\n"
+        "ATURAN GAYA BAHASA:\n"
+        "1. Jawab langsung ke inti pertanyaan mahasiswa secara natural, tanpa kalimat pembuka klise AI.\n"
+        "2. DILARANG menggunakan emoji atau emotikon.\n"
+        "3. Jika mahasiswa bertanya bisa bikin surat apa saja, tampilkan daftar surat di atas dan jelaskan bahwa kamu juga melayani pembuatan Surat Custom sesuai kebutuhan."
     )
+    msg_clean = (user_message or "").strip() or "Halo"
     prompt = (
-        f"Riwayat percakapan sebelumnya:\n{history_text}\n\n"
-        f"Pesan terbaru mahasiswa: {user_message}\n\n"
-        "Berikan jawaban yang relevan, spesifik, dan langsung membantu:"
+        f"Riwayat chat:\n{history_text}\n\n"
+        f"Pesan mahasiswa: {msg_clean}\n\n"
+        "Jawab langsung dan membantu:"
     )
     if api_key:
         candidate_models = [
@@ -121,11 +121,48 @@ def generate_conversational_reply(
                     continue
         except Exception:
             pass
-    daftar_ringkas = "\n".join(line.split(":")[0] for line in catalog_lines)
     return strip_emojis(
-        "Saya bisa membantu membuatkan berbagai surat resmi kampus berikut:\n\n"
-        f"{daftar_ringkas}\n\n"
-        "Selain jenis surat di atas, saya juga bisa membuatkan **Surat Custom** sesuai kebutuhan spesifik kamu "
+        "Saya bisa membantu membuatkan surat resmi kampus berikut:\n\n"
+        f"{catalog_text}\n\n"
+        "Selain daftar di atas, saya juga bisa membuatkan **Surat Custom** sesuai kebutuhan spesifik kamu "
         "(seperti surat izin kegiatan, surat pernyataan, dispensasi, atau surat pengantar khusus).\n\n"
-        "Sebutkan saja jenis surat dan keperluannya, nanti langsung saya siapkan drafnya."
+        "Sebutkan jenis surat dan keperluannya, nanti langsung saya buatkan drafnya."
     )
+
+def upgrade_static_assistant_reply(
+    reply_text: str,
+    user_message: str,
+    thread=None,
+    student=None,
+) -> str:
+    txt = str(reply_text or "").strip()
+    if not txt:
+        return txt
+    is_generic_stub = (
+        "Halo, saya adalah Asisten AI" in txt
+        or "Silakan deskripsikan jenis surat yang ingin Anda buat" in txt
+    )
+    if not is_generic_stub:
+        return strip_emojis(txt)
+    hist = []
+    if thread is not None:
+        try:
+            hist = list(
+                thread.messages.order_by("created_at").values("sender", "message")
+            )
+        except Exception:
+            hist = []
+    stu_info = {}
+    if student is not None:
+        stu_info = {
+            "nama": getattr(getattr(student, "user", None), "nama", "-"),
+            "nim": getattr(student, "nim", "-"),
+            "prodi": getattr(getattr(student, "prodi", None), "nama_prodi", "-"),
+            "semester": getattr(student, "semester_aktif", "-"),
+        }
+    smart = generate_conversational_reply(
+        user_message=user_message,
+        history_messages=hist,
+        student_info=stu_info,
+    )
+    return strip_emojis(smart or txt)

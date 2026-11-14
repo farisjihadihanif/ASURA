@@ -2,7 +2,9 @@
 contextBridge.exposeInMainWorld('asuraAPI', {
   window: {
     setMode: (expanded) => ipcRenderer.invoke('window:set-mode', expanded),
-    closePopup: () => ipcRenderer.invoke('window:close-popup')
+    closePopup: () => ipcRenderer.invoke('window:close-popup'),
+    setAutoCloseLock: (locked) => ipcRenderer.invoke('window:set-auto-close-lock', locked),
+    onAutoCollapsed: (callback) => ipcRenderer.on('widget:auto-collapsed', () => callback())
   },
   config: {
     get: () => ipcRenderer.invoke('config:get'),
@@ -11,7 +13,12 @@ contextBridge.exposeInMainWorld('asuraAPI', {
   auth: {
     getUser: () => ipcRenderer.invoke('session:get-user'),
     login: (credentials) => ipcRenderer.invoke('auth:login', credentials),
-    logout: () => ipcRenderer.invoke('auth:logout')
+    logout: () => ipcRenderer.invoke('auth:logout'),
+    registerLookup: (nipNim) => ipcRenderer.invoke('auth:register-lookup', nipNim),
+    register: (payload) => ipcRenderer.invoke('auth:register', payload),
+    listAccounts: () => ipcRenderer.invoke('auth:list-accounts'),
+    addAccount: () => ipcRenderer.invoke('auth:add-account'),
+    switchAccount: (nipNim) => ipcRenderer.invoke('auth:switch-account', nipNim)
   },
   api: {
     call: (request) => ipcRenderer.invoke('api:call', request)
@@ -31,3 +38,4 @@ contextBridge.exposeInMainWorld('asuraAPI', {
     quit: () => ipcRenderer.invoke('app:quit')
   }
 });
+

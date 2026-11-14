@@ -19,17 +19,6 @@ import PdfPreviewModal from "../components/PdfPreviewModal";
 import type { SuratRequestDetail, SuratRequestListItem } from "../types";
 
 export const LecturerApprovalsPage: React.FC = () => {
-  useEffect(() => {
-    const syncNow = () => {
-      void loadRequests();
-    };
-    window.addEventListener('asura:notifications-updated', syncNow);
-    const interval = window.setInterval(syncNow, 2000);
-    return () => {
-      window.removeEventListener('asura:notifications-updated', syncNow);
-      window.clearInterval(interval);
-    };
-  }, []);
   const { user, logout, refreshUser } = useAuth();
   const [requests, setRequests] = useState<SuratRequestListItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);

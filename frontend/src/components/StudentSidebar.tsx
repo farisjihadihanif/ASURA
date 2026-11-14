@@ -8,6 +8,7 @@ import {
   PanelLeftClose,
   Trash2,
 } from 'lucide-react';
+import AccountSwitcher from "./AccountSwitcher";
 import type { ChatThreadItem, SuratType, User } from '../types';
 interface StudentSidebarProps {
   user: User;
@@ -138,14 +139,17 @@ export const StudentSidebar: React.FC<StudentSidebarProps> = ({
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="inline-flex items-center gap-2 text-xs text-[#27211e] hover:text-[#d76b3e] font-medium transition cursor-pointer"
-        >
-          <LogOut className="w-3.5 h-3.5 text-[#857870]" />
-          <span>Keluar</span>
-        </button>
+        <div className="flex flex-col gap-1">
+          <AccountSwitcher />
+          <button
+            type="button"
+            onClick={onLogout}
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-[#27211e] hover:bg-[#eadfd7]/50 hover:text-[#d76b3e] font-medium transition cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5 text-[#857870] shrink-0" />
+            <span>Keluar</span>
+          </button>
+        </div>
       </div>
     </aside>
   );

@@ -19,6 +19,19 @@ def process_surat_request(student, surat_type, payload_data, attachments_files=N
     return handle_manual_approval_surat(student, surat_type, payload_data, attachments_files)
 
 
+def _close_sibling_approvals(approval_step):
+    """Jika beberapa dosen (pejabat + dosen pengampu) menerima antrean yang sama,
+    keputusan pertama berlaku; antrean paralel lain di langkah yang sama dihapus."""
+    try:
+        SuratApproval.objects.filter(
+            surat_request=approval_step.surat_request,
+            step_order=approval_step.step_order,
+            status='PENDING',
+        ).exclude(pk=approval_step.pk).delete()
+    except Exception as exc:
+        logger.warning("[SIBLING_APPROVAL] %s", exc)
+
+
 def process_approval_action(
     approval_id,
     lecturer,
@@ -42,19 +55,14 @@ def process_approval_action(
 
     surat_req = approval_step.surat_request
 
-    demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', True)
+    demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', False)
     demo_target_surat = getattr(settings, 'DEMO_TARGET_SURAT', ['SR-MAG', 'SR-BEA', 'SP-MAG', 'SI-MAG', 'SK-KUL'])
     demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
     lecturer_nip = getattr(getattr(lecturer, 'user', None), 'nip_nim', None)
     lecturer_nama = getattr(getattr(lecturer, 'user', None), 'nama', '')
-    is_demo_bypass = (
-        demo_enabled
-        and (
-            surat_req.kode_surat.kode_surat in demo_target_surat
-            or lecturer_nip == demo_approver_nip
-            or "Joel Evans" in lecturer_nama
-        )
-    )
+    # Hanya akun pejabat resmi (NIP demo) yang boleh melewati pengecekan antrean.
+    # Dosen lain hanya bisa memproses antrean yang memang ditugaskan kepadanya.
+    is_demo_bypass = bool(demo_enabled and lecturer_nip == demo_approver_nip)
 
     if not is_demo_bypass and approval_step.approver != lecturer:
         return {"error": "Anda tidak memiliki hak akses untuk menyetujui antrean ini."}, 403
@@ -84,12 +92,18 @@ def process_approval_action(
                 slots_snapshot={"event": "REVISION_REQUIRED", "surat_request_id": surat_req.id},
             )
             surat_req.chat_thread.save(update_fields=["updated_at"])
+            try:
+                from .revision_assistant import post_guidance_async
+                post_guidance_async(surat_req.id)
+            except Exception as guide_exc:
+                logger.warning("[REVISION_GUIDANCE] %s", guide_exc)
         return {"message": "Permintaan revisi telah dikirim kepada mahasiswa."}, 200
 
     if action == 'REJECT':
         approval_step.status = 'REJECTED'
         approval_step.catatan = catatan
         approval_step.save(update_fields=['status', 'catatan'])
+        _close_sibling_approvals(approval_step)
 
         surat_req.status = 'REJECTED'
         surat_req.save(update_fields=['status'])
@@ -120,6 +134,7 @@ def process_approval_action(
         approval_step.status = 'APPROVED'
         approval_step.catatan = catatan
         approval_step.save(update_fields=['status', 'catatan'])
+        _close_sibling_approvals(approval_step)
 
         if isinstance(final_approved_content, str) and final_approved_content.strip():
             surat_req.final_approved_content = final_approved_content.strip()
