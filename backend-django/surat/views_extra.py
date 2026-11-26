@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import logging
 import os
 import re
@@ -40,6 +40,12 @@ def _user_can_view_surat(user, surat_req: SuratRequest) -> bool:
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if hasattr(user, "lecturer_profile") and not _is_custom_surat(surat_req):
+        if not getattr(settings, "REQUIRE_MANUAL_APPROVAL", False):
+            from .views import _filter_non_custom_for_lecturer
+            return _filter_non_custom_for_lecturer(
+                SuratRequest.objects.filter(pk=surat_req.pk),
+                user.lecturer_profile,
+            ).exists()
         return True
     return False
 

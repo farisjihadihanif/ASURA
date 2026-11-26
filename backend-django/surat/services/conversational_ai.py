@@ -78,7 +78,7 @@ def generate_conversational_reply(
         f"{catalog_text}\n\n"
         "Kemampuan tambahan penting:\n"
         "- Selain daftar surat standar di atas, kamu JUGA BISA membuatkan SURAT CUSTOM (bebas sesuai kebutuhan mahasiswa, misalnya surat izin kegiatan, surat pernyataan, surat pengantar khusus, dispensasi, atau surat permohonan lainnya).\n"
-        "- Alur surat kampus resmi: kumpulkan detail -> susun draf -> diteruskan ke pejabat kampus (kaprodi/dekan) untuk ACC -> kirim email atau cetak.\n"
+        "- Alur surat kampus resmi: kumpulkan detail -> susun draf AI -> langsung terbit otomatis lengkap dengan nomor surat resmi dan tanda tangan elektronik pejabat berwenang (kaprodi/dekan) tanpa menunggu ACC dosen -> lihat PDF, kirim email, atau cetak.\n"
         "- Alur Surat Custom (pribadi, mis. surat sakit, surat cinta): langsung jadi tanpa persetujuan siapa pun dan TIDAK dikirim ke dosen. Jangan pernah bilang surat custom diteruskan ke dosen.\n\n"
         "ATURAN GAYA BAHASA:\n"
         "1. Jawab langsung ke inti pertanyaan mahasiswa secara natural, tanpa kalimat pembuka klise AI.\n"

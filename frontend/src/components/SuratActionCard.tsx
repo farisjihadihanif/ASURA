@@ -143,20 +143,24 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
           {isCustomSurat
             ? 'SIAP DIGUNAKAN'
             : suratRequest.status === 'REVISION_REQUIRED'
-            ? 'PERLU REVISI'
+            ? 'PERLU PERBAIKAN DATA'
+            : suratRequest.status === 'SUBMITTED'
+            ? 'MENYUSUN & MENERBITKAN'
+            : suratRequest.status === 'APPROVED'
+            ? 'TERBIT'
             : suratRequest.status}
         </span>
       </div>
       {suratRequest.status === 'REVISION_REQUIRED' && (
         <p className="text-xs text-amber-700 mt-2.5 leading-relaxed">
-          Dosen meminta revisi. Balas di chat ini dengan perbaikan yang kamu inginkan (atau tanya ASURA apa yang
-          perlu diubah), lalu ketik <strong>&quot;ajukan ulang&quot;</strong> agar surat dikirim kembali ke dosen.
+          Draf surat masih memerlukan perbaikan atau kelengkapan data. Balas di chat ini dengan detail yang ingin
+          kamu lengkapi, lalu ketik <strong>&quot;terbitkan ulang&quot;</strong> agar surat langsung disusun ulang dan diterbitkan.
         </p>
       )}
       {!isApprovedOrDone && suratRequest.status !== 'REJECTED' && suratRequest.status !== 'REVISION_REQUIRED' && (
         <p className="text-xs text-[#857870] mt-2.5 leading-relaxed">
-          Permohonan sedang menunggu persetujuan (ACC) dari dosen. Setelah di-ACC, pilihan untuk
-          mengirim ke <strong className="text-[#27211e]">Email</strong> atau mencetak ke{' '}
+          ASURA sedang menyusun draf dan menerbitkan surat resmi secara otomatis. Setelah terbit, pilihan untuk
+          melihat PDF, mengirim ke <strong className="text-[#27211e]">Email</strong>, atau mencetak ke{' '}
           <strong className="text-[#27211e]">Printer</strong> akan muncul di sini.
         </p>
       )}
@@ -165,7 +169,7 @@ export const SuratActionCard: React.FC<SuratActionCardProps> = ({
           <p className="text-xs text-[#27211e] font-medium">
             {isCustomSurat
               ? 'Surat custom selesai disusun atas namamu sendiri. Pilih tindakan:'
-              : 'Surat sudah di-ACC dosen. Pilih tindakan selanjutnya:'}
+              : 'Surat resmi sudah terbit. Pilih tindakan selanjutnya:'}
           </p>
           <input
             ref={sigInputRef}

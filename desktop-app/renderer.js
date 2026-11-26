@@ -1,11 +1,15 @@
 ﻿const $ = (id) => document.getElementById(id);
 const SUBMIT_TRIGGER_PHRASES = new Set([
+  'terbitkan',
+  'terbitkan surat',
+  'terbitkan ulang',
+  'buat dan terbitkan surat',
+  'buat surat',
+  'buat surat custom',
   'ajukan',
   'ajukan surat',
   'ajukan ulang',
   'ajukan sekarang',
-  'kirim ke dosen',
-  'buat surat custom',
   'lanjut',
   'submit',
 ]);
@@ -144,8 +148,8 @@ function renderActionBar(options = [], force = false) {
     submitBtn.className = 'chip-btn primary-chip';
     submitBtn.textContent = isCustomIntent(state.intent)
       ? 'Buat Surat Custom'
-      : 'Ajukan Surat ke Dosen';
-    submitBtn.onclick = () => void submitSuratToLecturer();
+      : 'Terbitkan Surat';
+    submitBtn.onclick = () => void createAndIssueSurat();
     row.appendChild(submitBtn);
   }
   if (reqReady) {
@@ -350,8 +354,8 @@ async function refreshThreadState(forceRender = false) {
       !isCustomIntent(state.latestRequest?.kode_surat)
     ) {
       await window.asuraAPI.notifications.show({
-        title: 'Surat Di-ACC Dosen',
-        body: `${state.latestRequest.nama_surat} sudah disetujui. Pilih Kirim ke Email atau Cetak ke Printer.`,
+        title: 'Surat Resmi Terbit',
+        body: `${state.latestRequest.nama_surat} telah diterbitkan otomatis. Pilih Kirim ke Email atau Cetak ke Printer.`,
       });
     }
     state.lastKnownStatus = newStatus;
@@ -364,7 +368,7 @@ async function sendMessage(text) {
   if (!state.threadId) await initNewThread();
   if (canSubmitNow() && SUBMIT_TRIGGER_PHRASES.has(clean.toLowerCase())) {
     $('chat-input').value = '';
-    await submitSuratToLecturer();
+    await createAndIssueSurat();
     return;
   }
   state.lastMessagesSig = '';
@@ -384,7 +388,7 @@ async function sendMessage(text) {
     $('btn-send').disabled = false;
   }
 }
-async function submitSuratToLecturer() {
+async function createAndIssueSurat() {
   if (!state.intent || !state.threadId) return;
   $('action-bar').innerHTML = '';
   state.lastActionSig = '';

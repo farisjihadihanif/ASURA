@@ -708,7 +708,7 @@ def process_slot_filling_redis(
             + (
                 "Silakan klik tombol **Buat Surat Custom** di bawah. Surat pribadi ini langsung jadi tanpa persetujuan dosen."
                 if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
-                else "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah untuk mengirim draf ke antrean persetujuan dosen."
+                else "Silakan klik tombol **Buat & Terbitkan Surat** di bawah agar ASURA menyusun dan menerbitkan surat resmi secara otomatis."
             )
         )
     # 1. GUNAKAN AI / EXTRACTOR UNTUK MENANGKAP SLOT DARI PESAN BEBAS USER & BERKAS LAMPIRAN
@@ -869,7 +869,7 @@ def process_slot_filling_redis(
             "Silakan klik tombol **Buat Surat Custom** di bawah agar surat segera disusun. "
             "Surat pribadi ini tidak dikirim ke dosen dan tidak perlu persetujuan."
             if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
-            else "Silakan klik tombol **Ajukan Surat ke Dosen** di bawah agar draf surat segera disusun dan dikirim ke dosen untuk di-ACC."
+            else "Silakan klik tombol **Buat & Terbitkan Surat** di bawah agar draf surat segera disusun dan diterbitkan secara otomatis."
         )
     )
 

@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from django.conf import settings
 from django.db import close_old_connections
+from django.db.models import Q
 from rest_framework import permissions, status
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -43,8 +44,8 @@ from .serializers import (
     SuratTypeSerializer,
     ReDraftSuratRequestSerializer,
 )
-from .services.workflow_service import process_approval_action
-from .services.manual_handlers import create_approval_workflow_for_request
+from .services.workflow_service import process_approval_action, _execute_final_issuance_worker
+from .services.manual_handlers import create_approval_workflow_for_request, resolve_official_approver
 from .services.session_manager import AutoSuratSessionManager
 from .services.notifications import notify_user
 from .services.eligibility import check_eligibility
@@ -68,6 +69,157 @@ def _mark_surat_request_failed(surat_request_id: int, error_code: str, error_rea
             )
     except Exception as db_exc:
         logger.error("Gagal memperbarui status FAILED untuk SuratRequest id=%s: %s", surat_request_id, db_exc)
+
+
+def _handle_incomplete_draft_in_worker(
+    surat_req: SuratRequest,
+    draft_output: Any,
+    readiness: Dict[str, Any],
+    *,
+    is_redraft: bool = False,
+) -> None:
+    surat_req.payload_data = readiness["structured_payload"]
+    surat_req.ai_original_draft = getattr(draft_output, "ai_original_draft", "") or surat_req.ai_original_draft or ""
+    surat_req.self_critique_score = readiness["critique_score"]
+    surat_req.revision_notes = readiness["revision_notes"]
+    surat_req.status = SuratStatus.REVISION_REQUIRED
+    surat_req.save(
+        update_fields=[
+            "payload_data",
+            "ai_original_draft",
+            "self_critique_score",
+            "revision_notes",
+            "status",
+        ]
+    )
+    SuratAuditLog.objects.create(
+        surat_request=surat_req,
+        action_id="AI_02" if is_redraft else "AI_REV_REQ",
+        action="AI_REDRAFT_STILL_INCOMPLETE" if is_redraft else "AI_DRAFTING_LOW_QUALITY_SCORE",
+    )
+    if not getattr(settings, "REQUIRE_MANUAL_APPROVAL", False):
+        notes_text = "; ".join(
+            str(n).strip() for n in (surat_req.revision_notes or []) if str(n).strip()
+        ) or "Mohon lengkapi detail permohonan surat."
+        notify_user(
+            surat_req.student.user,
+            "REVISION_REQUIRED",
+            f"Perlu Perbaikan Data: {surat_req.kode_surat.nama_surat}",
+            notes_text,
+            surat_req,
+        )
+        if surat_req.chat_thread:
+            ChatMessage.objects.create(
+                thread=surat_req.chat_thread,
+                sender="assistant",
+                message=(
+                    f"Draf **{surat_req.kode_surat.nama_surat}** belum dapat diterbitkan otomatis karena data masih perlu dilengkapi:\n\n"
+                    f"- {notes_text}\n\n"
+                    f"Balas chat ini dengan informasi yang dibutuhkan, lalu ketik **\"terbitkan ulang\"**."
+                ),
+                slots_snapshot={"event": "REVISION_REQUIRED", "surat_request_id": surat_req.id},
+            )
+            surat_req.chat_thread.save(update_fields=["updated_at"])
+
+
+def _finalize_ready_draft_in_worker(
+    surat_req: SuratRequest,
+    draft_output: Any,
+    readiness: Dict[str, Any],
+    *,
+    is_redraft: bool = False,
+) -> None:
+    kode = str(surat_req.kode_surat.kode_surat or "").upper()
+    surat_req.payload_data = readiness["structured_payload"]
+    surat_req.ai_original_draft = getattr(draft_output, "ai_original_draft", "") or surat_req.ai_original_draft or ""
+    surat_req.self_critique_score = readiness["critique_score"]
+    surat_req.revision_notes = readiness["revision_notes"]
+
+    if kode.startswith("CUSTOM"):
+        surat_req.final_approved_content = surat_req.final_approved_content or surat_req.ai_original_draft or ""
+        surat_req.status = SuratStatus.APPROVED
+        surat_req.save(
+            update_fields=[
+                "payload_data",
+                "ai_original_draft",
+                "final_approved_content",
+                "self_critique_score",
+                "revision_notes",
+                "status",
+            ]
+        )
+        SuratApproval.objects.filter(surat_request=surat_req).delete()
+        SuratAuditLog.objects.create(
+            surat_request=surat_req,
+            action_id="AI_02",
+            action="CUSTOM_LETTER_READY_NO_APPROVAL",
+        )
+        return
+
+    require_manual = getattr(settings, "REQUIRE_MANUAL_APPROVAL", False)
+    if require_manual:
+        surat_req.status = SuratStatus.PENDING_APPROVAL
+        surat_req.save(
+            update_fields=[
+                "payload_data",
+                "ai_original_draft",
+                "self_critique_score",
+                "revision_notes",
+                "status",
+            ]
+        )
+        if is_redraft:
+            SuratApproval.objects.filter(surat_request=surat_req).delete()
+        create_approval_workflow_for_request(surat_req, surat_req.student)
+        if is_redraft:
+            from .agents import ensure_approval_queue_for_request
+            ensure_approval_queue_for_request(surat_req)
+        for app_step in SuratApproval.objects.filter(
+            surat_request=surat_req, status=ApprovalStatus.PENDING
+        ).select_related("approver__user"):
+            notify_user(
+                app_step.approver.user,
+                "APPROVAL_REQUIRED",
+                f"{'Revisi Diajukan Ulang' if is_redraft else 'Permohonan Baru'}: {surat_req.kode_surat.nama_surat}",
+                (
+                    f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan ulang surat setelah revisi."
+                    if is_redraft
+                    else f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan {surat_req.kode_surat.nama_surat}."
+                ),
+                surat_req,
+            )
+        SuratAuditLog.objects.create(
+            surat_request=surat_req,
+            action_id="AI_02",
+            action="AI_REDRAFT_SUCCESS_PENDING_APPROVAL" if is_redraft else "AI_DRAFT_COMPLETED_PENDING_APPROVAL",
+        )
+        return
+
+    # Mode V2 Direct Auto-Issuance: langsung terbitkan surat resmi tanpa antrean approval dosen
+    SuratApproval.objects.filter(surat_request=surat_req).delete()
+    surat_req.final_approved_content = surat_req.ai_original_draft or surat_req.final_approved_content or ""
+    surat_req.save(
+        update_fields=[
+            "payload_data",
+            "ai_original_draft",
+            "final_approved_content",
+            "self_critique_score",
+            "revision_notes",
+        ]
+    )
+    signer_obj = resolve_official_approver(surat_req.student, surat_req.kode_surat.kode_surat)
+    _execute_final_issuance_worker(
+        surat_request_id=surat_req.id,
+        signer_lecturer_id=getattr(signer_obj, "pk", None),
+        final_status=SuratStatus.APPROVED,
+    )
+    surat_req.refresh_from_db(fields=["status"])
+    if surat_req.status != SuratStatus.FAILED:
+        SuratAuditLog.objects.create(
+            surat_request=surat_req,
+            action_id="AI_02",
+            action="AI_REDRAFT_AUTO_ISSUED" if is_redraft else "AI_DRAFT_AUTO_ISSUED",
+        )
 
 
 def _execute_drafting_agent_worker(
@@ -104,76 +256,21 @@ def _execute_drafting_agent_worker(
             dynamic_fields_dict=dynamic_fields_dict,
             agent=active_agent,
         )
-        structured_payload = readiness["structured_payload"] or dict(initial_payload or {})
+        if not readiness["structured_payload"] and initial_payload:
+            readiness["structured_payload"] = dict(initial_payload)
 
         surat_req = SuratRequest.objects.select_related(
-            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat"
+            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat", "chat_thread"
         ).get(pk=surat_request_id)
-        surat_req.payload_data = structured_payload
-        surat_req.ai_original_draft = getattr(draft_output, "ai_original_draft", "")
-        surat_req.self_critique_score = readiness["critique_score"]
-        surat_req.revision_notes = readiness["revision_notes"]
 
         has_missing_info = getattr(getattr(draft_output, "evaluation", None), "has_missing_info", False)
         is_ready = readiness["is_ready_for_approval"] and not has_missing_info
 
         if not is_ready:
-            surat_req.status = SuratStatus.REVISION_REQUIRED
-            surat_req.save(
-                update_fields=[
-                    "payload_data",
-                    "ai_original_draft",
-                    "self_critique_score",
-                    "revision_notes",
-                    "status",
-                ]
-            )
-            SuratAuditLog.objects.create(
-                surat_request=surat_req,
-                action_id="AI_REV_REQ",
-                action="AI_DRAFTING_LOW_QUALITY_SCORE",
-            )
+            _handle_incomplete_draft_in_worker(surat_req, draft_output, readiness, is_redraft=False)
             return
 
-        surat_req.status = SuratStatus.PENDING_APPROVAL
-        surat_req.save(
-            update_fields=[
-                "payload_data",
-                "ai_original_draft",
-                "self_critique_score",
-                "revision_notes",
-                "status",
-            ]
-        )
-
-        if str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"):
-            # Surat custom bersifat pribadi: tidak masuk antrean dosen dan tidak ada notifikasi ke dosen.
-            SuratApproval.objects.filter(surat_request=surat_req).delete()
-            SuratAuditLog.objects.create(
-                surat_request=surat_req,
-                action_id="AI_02",
-                action="CUSTOM_LETTER_READY_NO_APPROVAL",
-            )
-            return
-
-        create_approval_workflow_for_request(surat_req, surat_req.student)
-
-        for app_step in SuratApproval.objects.filter(
-            surat_request=surat_req, status=ApprovalStatus.PENDING
-        ).select_related("approver__user"):
-            notify_user(
-                app_step.approver.user,
-                "APPROVAL_REQUIRED",
-                f"Permohonan Baru: {surat_req.kode_surat.nama_surat}",
-                f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan {surat_req.kode_surat.nama_surat}.",
-                surat_req,
-            )
-
-        SuratAuditLog.objects.create(
-            surat_request=surat_req,
-            action_id="AI_02",
-            action="AI_DRAFT_COMPLETED_PENDING_APPROVAL",
-        )
+        _finalize_ready_draft_in_worker(surat_req, draft_output, readiness, is_redraft=False)
     except (SuratAgentTimeoutError, SuratAgentRateLimitError) as exc:
         _mark_surat_request_failed(surat_request_id, "AI_ERR_LIMIT", f"{type(exc).__name__}: {exc}")
     except SuratAgentError as exc:
@@ -198,7 +295,9 @@ def _execute_redraft_agent_worker(
 ) -> None:
     close_old_connections()
     try:
-        surat_req = SuratRequest.objects.get(pk=surat_request_id)
+        surat_req = SuratRequest.objects.select_related(
+            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat", "chat_thread"
+        ).get(pk=surat_request_id)
         active_agent = agent if agent is not None else SuratDraftingAgent()
         draft_output = active_agent.draft_letter_with_reflection(
             user_prompt_context=user_prompt_context,
@@ -210,7 +309,7 @@ def _execute_redraft_agent_worker(
             student_metadata=student_metadata,
         )
 
-        from .agents import evaluate_draft_readiness, ensure_approval_queue_for_request
+        from .agents import evaluate_draft_readiness
 
         readiness = evaluate_draft_readiness(
             draft_output=draft_output,
@@ -218,49 +317,14 @@ def _execute_redraft_agent_worker(
             agent=active_agent,
         )
 
-        surat_req.payload_data = readiness["structured_payload"]
-        surat_req.ai_original_draft = getattr(draft_output, "ai_original_draft", "")
-        surat_req.self_critique_score = readiness["critique_score"]
-        surat_req.revision_notes = readiness["revision_notes"]
+        has_missing_info = getattr(getattr(draft_output, "evaluation", None), "has_missing_info", False)
+        is_ready = readiness["is_ready_for_approval"] and not has_missing_info
 
-        if readiness["is_ready_for_approval"]:
-            surat_req.status = SuratStatus.PENDING_APPROVAL
-            action_code = "AI_REDRAFT_SUCCESS_PENDING_APPROVAL"
-        else:
-            surat_req.status = SuratStatus.REVISION_REQUIRED
-            action_code = "AI_REDRAFT_STILL_INCOMPLETE"
+        if not is_ready:
+            _handle_incomplete_draft_in_worker(surat_req, draft_output, readiness, is_redraft=True)
+            return
 
-        surat_req.save(
-            update_fields=[
-                "payload_data",
-                "ai_original_draft",
-                "self_critique_score",
-                "revision_notes",
-                "status",
-            ]
-        )
-
-        if surat_req.status == SuratStatus.PENDING_APPROVAL and not str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"):
-            # Hapus antrean lama agar pengajuan ulang tidak menggandakan approval.
-            SuratApproval.objects.filter(surat_request=surat_req).delete()
-            create_approval_workflow_for_request(surat_req, surat_req.student)
-            ensure_approval_queue_for_request(surat_req)
-            for app_step in SuratApproval.objects.filter(
-                surat_request=surat_req, status=ApprovalStatus.PENDING
-            ).select_related("approver__user"):
-                notify_user(
-                    app_step.approver.user,
-                    "APPROVAL_REQUIRED",
-                    f"Revisi Diajukan Ulang: {surat_req.kode_surat.nama_surat}",
-                    f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan ulang surat setelah revisi.",
-                    surat_req,
-                )
-
-        SuratAuditLog.objects.create(
-            surat_request=surat_req,
-            action_id="AI_02",
-            action=action_code,
-        )
+        _finalize_ready_draft_in_worker(surat_req, draft_output, readiness, is_redraft=True)
     except Exception as exc:
         _mark_surat_request_failed(surat_request_id, "AI_REDRAFT_ERR", f"{type(exc).__name__}: {exc}")
     finally:
@@ -717,7 +781,7 @@ class SuratRequestRedraftAPIView(APIView):
         return Response(
             {
                 "status": "success",
-                "message": "Revisi permohonan surat berhasil diterima dan diproses ulang oleh ASURA.",
+                "message": "Revisi permohonan surat berhasil diterima, sedang disusun ulang dan diterbitkan otomatis oleh ASURA.",
                 "request_id": surat_req.id,
                 "surat_status": surat_req.status,
                 "data": {"request_id": surat_req.id, "status": surat_req.status},
@@ -822,11 +886,15 @@ class SuratRequestCreateAPIView(APIView):
                 thread=linked_thread,
                 sender="assistant",
                 message=(
-                    f"📨 Permohonan **{surat_type.nama_surat}** telah diterima. "
+                    f"Permohonan **{surat_type.nama_surat}** telah diterima. "
                     + (
-                        "ASURA sedang menyusun suratmu. Surat ini bersifat pribadi, tidak dikirim ke dosen dan tidak perlu persetujuan."
+                        "ASURA sedang menyusun suratmu. Surat ini bersifat pribadi, tanpa kop pejabat dan langsung siap digunakan."
                         if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
-                        else "ASURA sedang menyusun draf resmi dan meneruskannya ke dosen untuk di-ACC."
+                        else (
+                            "ASURA sedang menyusun draf resmi dan menerbitkan surat Anda secara otomatis tanpa menunggu persetujuan dosen."
+                            if not getattr(settings, "REQUIRE_MANUAL_APPROVAL", False)
+                            else "ASURA sedang menyusun draf resmi dan meneruskannya ke dosen untuk di-ACC."
+                        )
                     )
                 ),
                 slots_snapshot={"event": "SURAT_SUBMITTED", "surat_request_id": surat_req.id},
@@ -856,9 +924,13 @@ class SuratRequestCreateAPIView(APIView):
             {
                 "status": "success",
                 "message": (
-                    f"Permohonan surat {surat_type.nama_surat} berhasil diterima. Surat pribadi ini tidak perlu persetujuan dosen."
+                    f"Permohonan surat {surat_type.nama_surat} berhasil diterima. Surat pribadi ini langsung siap tanpa persetujuan dosen."
                     if str(surat_type.kode_surat or "").upper().startswith("CUSTOM")
-                    else f"Permohonan surat {surat_type.nama_surat} berhasil diterima dan diteruskan ke dosen."
+                    else (
+                        f"Permohonan surat {surat_type.nama_surat} berhasil diterima dan sedang diproses untuk diterbitkan otomatis."
+                        if not getattr(settings, "REQUIRE_MANUAL_APPROVAL", False)
+                        else f"Permohonan surat {surat_type.nama_surat} berhasil diterima dan diteruskan ke dosen."
+                    )
                 ),
                 "request_id": surat_req.id,
                 "surat_status": surat_req.status,
@@ -866,6 +938,19 @@ class SuratRequestCreateAPIView(APIView):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+def _filter_non_custom_for_lecturer(queryset, lecturer: Lecturer):
+    """Membatasi arsip surat resmi yang dapat dipantau dosen sesuai lingkup prodi/fakultas."""
+    jabs = " ".join(str(j).lower() for j in (getattr(lecturer, "jabatan_struktural", None) or []))
+    if any(role in jabs for role in ("dekan", "wadek")):
+        if lecturer.fakultas_id:
+            return queryset.filter(student__fakultas_id=lecturer.fakultas_id)
+    elif lecturer.prodi_id:
+        return queryset.filter(student__prodi_id=lecturer.prodi_id)
+    elif lecturer.fakultas_id:
+        return queryset.filter(student__fakultas_id=lecturer.fakultas_id)
+    return queryset
 
 
 class SuratRequestListAPIView(ListAPIView):
@@ -879,13 +964,10 @@ class SuratRequestListAPIView(ListAPIView):
             return SuratRequest.objects.filter(student=user.student_profile).order_by('-created_at')
         if hasattr(user, 'lecturer_profile'):
             lecturer = user.lecturer_profile
-            demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', False)
-            demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
-            is_demo_lecturer = getattr(user, 'nip_nim', None) == demo_approver_nip
-            # Dosen hanya mengurus surat kampus. Surat custom (pribadi) tidak pernah tampil di dashboard dosen.
+            # Dosen hanya melihat surat kampus resmi; surat custom (pribadi) tidak pernah tampil di dashboard dosen.
             non_custom = SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
-            if demo_enabled and is_demo_lecturer:
-                return non_custom.order_by('-created_at').distinct()
+            if not getattr(settings, 'REQUIRE_MANUAL_APPROVAL', False):
+                return _filter_non_custom_for_lecturer(non_custom, lecturer).order_by('-created_at')
             return non_custom.filter(approvals__approver=lecturer).order_by('-created_at').distinct()
         return SuratRequest.objects.all().order_by('-created_at')
 
@@ -899,7 +981,10 @@ class SuratRequestDetailAPIView(RetrieveAPIView):
         user = self.request.user
         if hasattr(user, 'student_profile'):
             return SuratRequest.objects.filter(student=user.student_profile)
-        return SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
+        non_custom = SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
+        if hasattr(user, 'lecturer_profile') and not getattr(settings, 'REQUIRE_MANUAL_APPROVAL', False):
+            return _filter_non_custom_for_lecturer(non_custom, user.lecturer_profile)
+        return non_custom
 
 
 class LecturerApprovalActionAPIView(APIView):
@@ -908,6 +993,13 @@ class LecturerApprovalActionAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request, approval_id):
+        if not getattr(settings, "REQUIRE_MANUAL_APPROVAL", False):
+            return Response(
+                {
+                    "error": "Alur persetujuan dosen telah dinonaktifkan. Surat kampus diproses dan diterbitkan secara otomatis.",
+                },
+                status=status.HTTP_410_GONE,
+            )
         action = request.data.get("action")
         if action not in ["APPROVE", "REJECT", "REVISION_REQUIRED"]:
             return Response(

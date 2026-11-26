@@ -1,4 +1,4 @@
-﻿import RichMessageText from '../components/RichMessageText';
+import RichMessageText from '../components/RichMessageText';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -27,11 +27,17 @@ import type {
   SuratType,
 } from '../types';
 const SUBMIT_TRIGGER_PHRASES = new Set([
+  'terbitkan',
+  'terbitkan surat',
+  'terbitkan ulang',
+  'buat dan terbitkan surat',
+  'buat & terbitkan surat',
+  'buat surat',
+  'buat surat custom',
   'ajukan',
   'ajukan surat',
   'ajukan ulang',
   'ajukan sekarang',
-  'kirim ke dosen',
   'lanjut',
   'submit',
 ]);
@@ -146,7 +152,7 @@ export const StudentChatPage: React.FC = () => {
       navigate('/chat');
     }
   };
-  const handleSubmitSuratToLecturer = async () => {
+  const handleCreateAndIssueSurat = async () => {
     if (!detectedIntent || !activeThreadId || submittingRequest) return;
     setSubmittingRequest(true);
     try {
@@ -167,7 +173,7 @@ export const StudentChatPage: React.FC = () => {
         {
           id: `err-sub-${Date.now()}`,
           sender: 'assistant',
-          text: extractErrorMessage(err, 'Gagal mengajukan surat ke dosen.'),
+          text: extractErrorMessage(err, 'Gagal memproses dan menerbitkan surat.'),
         },
       ]);
     } finally {
@@ -178,14 +184,14 @@ export const StudentChatPage: React.FC = () => {
     const textToSend = (overrideText ?? inputText).trim();
     if (!textToSend && attachments.length === 0) return;
     if (sending) return;
-    // Jika data sudah lengkap dan user mengetik "ajukan surat" / "ajukan ulang", langsung ajukan ke dosen
+    // Jika data sudah lengkap dan user mengetik kata kunci terbitkan/buat surat, langsung proses
     if (
       canSubmitNow &&
       attachments.length === 0 &&
       SUBMIT_TRIGGER_PHRASES.has(textToSend.toLowerCase())
     ) {
       setInputText('');
-      await handleSubmitSuratToLecturer();
+      await handleCreateAndIssueSurat();
       return;
     }
     setSending(true);
@@ -325,9 +331,9 @@ export const StudentChatPage: React.FC = () => {
                   </h3>
                   <p className="text-xs text-[#857870] mt-1.5 max-w-md mx-auto leading-relaxed">
                     Ceritakan surat akademik yang kamu butuhkan. ASURA akan mengumpulkan detail,
-                    menyiapkan draf, lalu surat kampus diteruskan ke pejabat kampus untuk di-ACC. Surat
-                    custom (pribadi) langsung jadi tanpa persetujuan. Setelah itu siap dikirim ke email atau
-                    dicetak ke printer.
+                    menyiapkan draf, dan langsung menerbitkan surat kampus secara otomatis tanpa antrean persetujuan dosen.
+                    Surat custom (pribadi) juga langsung jadi tanpa kop pejabat. Setelah terbit, kamu siap mengunduh PDF,
+                    mengirim ke email, atau mencetak ke printer.
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-2 pt-2">
@@ -385,7 +391,7 @@ export const StudentChatPage: React.FC = () => {
                 ))}
               </div>
             )}
-            {/* Tombol Ajukan Surat ke Dosen */}
+            {/* Tombol Buat & Terbitkan Surat */}
             {canSubmitNow && (
               <div className="ml-10 rounded-2xl border border-[#eadfd7] bg-[#fbf5f0] p-4 max-w-xl">
                 <div className="flex items-center gap-2 text-xs font-bold text-[#27211e]">
@@ -394,12 +400,12 @@ export const StudentChatPage: React.FC = () => {
                 </div>
                 <p className="text-xs text-[#857870] mt-1">
                   {String(detectedIntent || '').toUpperCase().startsWith('CUSTOM')
-                    ? 'Klik tombol di bawah agar ASURA langsung menyusun suratmu. Surat pribadi ini tidak dikirim ke dosen dan tidak perlu persetujuan.'
-                    : 'Klik tombol di bawah agar ASURA menyusun draf resmi dan mengirimkan notifikasi persetujuan ke pejabat kampus.'}
+                    ? 'Klik tombol di bawah agar ASURA langsung menyusun suratmu. Surat pribadi ini tidak memakai kop pejabat.'
+                    : 'Klik tombol di bawah agar ASURA menyusun draf resmi dan langsung menerbitkan surat Anda secara otomatis.'}
                 </p>
                 <button
                   type="button"
-                  onClick={() => void handleSubmitSuratToLecturer()}
+                  onClick={() => void handleCreateAndIssueSurat()}
                   disabled={submittingRequest}
                   className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#d76b3e] hover:bg-[#c35d32] text-white text-xs font-bold transition cursor-pointer disabled:opacity-60"
                 >
@@ -408,11 +414,15 @@ export const StudentChatPage: React.FC = () => {
                   ) : (
                     <CheckCircle2 className="w-4 h-4" />
                   )}
-                  <span>Buat & Proses Surat</span>
+                  <span>
+                    {String(detectedIntent || '').toUpperCase().startsWith('CUSTOM')
+                      ? 'Buat Surat Custom'
+                      : 'Buat & Terbitkan Surat'}
+                  </span>
                 </button>
               </div>
             )}
-            {/* Kartu Status & Opsi Email / Print setelah Di-ACC */}
+            {/* Kartu Status & Opsi PDF / Email / Print setelah Terbit */}
             {latestRequest && (
               <div className="pl-10">
                 <SuratActionCard

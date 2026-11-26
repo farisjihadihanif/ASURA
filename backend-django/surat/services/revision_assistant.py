@@ -1,4 +1,4 @@
-"""Asisten revisi: membantu mahasiswa memahami catatan revisi dosen dan mengajukan ulang surat."""
+"""Asisten revisi: membantu mahasiswa melengkapi atau memperbaiki data draf surat lalu menerbitkan ulang."""
 import json
 import os
 import re
@@ -13,7 +13,7 @@ from .conversational_ai import strip_emojis
 logger = getLogger(__name__)
 
 RESUBMIT_PATTERN = re.compile(
-    r"\b(ajukan|ajuin|kirim|submit|proses|buat)\s*(ulang|lagi|kembali)\b"
+    r"\b(ajukan|ajuin|kirim|submit|proses|buat|terbitkan)\s*(ulang|lagi|kembali)\b"
     r"|\b(ulang(i)?|revisi)\s+(sekarang|aja|saja)\b"
     r"|^\s*(ya|iya|oke|ok|siap|lanjut(kan)?|setuju|betul|benar|kirim|gas)\b[\s.!]*$",
     re.IGNORECASE,
@@ -85,34 +85,34 @@ def _context(surat_req) -> str:
         f"Jenis surat: {surat_req.kode_surat.nama_surat}\n"
         f"Data permohonan saat ini: {payload_txt}\n"
         f"Draf saat ini (ringkas): {(surat_req.ai_original_draft or '')[:1200]}\n"
-        f"Catatan revisi dosen: {latest_revision_note(surat_req)}"
+        f"Catatan perbaikan: {latest_revision_note(surat_req)}"
     )
 
 
 _SYSTEM = (
-    "Kamu adalah ASURA, asisten persuratan kampus. Dosen meminta revisi atas surat mahasiswa. "
-    "Tugasmu: (1) jelaskan secara konkret apa yang perlu diubah berdasarkan catatan dosen dan data permohonan, "
-    "beri contoh nilai perbaikan yang masuk akal (mis. durasi lebih singkat), dan tanyakan nilai yang diinginkan mahasiswa bila perlu; "
-    "(2) bila mahasiswa sudah menyebut perbaikan konkret atau meminta ajukan ulang, tandai ready_to_resubmit=true "
-    "dan rangkum instruksi perbaikan di correction_summary (gabungkan catatan dosen dan permintaan mahasiswa). "
+    "Kamu adalah ASURA, asisten persuratan kampus. Draf surat mahasiswa masih memerlukan perbaikan atau kelengkapan data. "
+    "Tugasmu: (1) jelaskan secara konkret apa yang perlu diubah berdasarkan catatan perbaikan dan data permohonan, "
+    "beri contoh nilai perbaikan yang masuk akal (mis. durasi lebih singkat atau detail instansi), dan tanyakan nilai yang diinginkan mahasiswa bila perlu; "
+    "(2) bila mahasiswa sudah menyebut perbaikan konkret atau meminta terbitkan ulang, tandai ready_to_resubmit=true "
+    "dan rangkum instruksi perbaikan di correction_summary (gabungkan catatan perbaikan dan permintaan mahasiswa). "
     "Gaya bahasa: Indonesia, ringkas, tanpa emoji, tanpa pembuka klise. "
     'Balas HANYA JSON: {"reply": str, "ready_to_resubmit": bool, "correction_summary": str}'
 )
 
 
 def generate_guidance(surat_req) -> str:
-    """Panduan proaktif setelah dosen meminta revisi."""
+    """Panduan proaktif setelah draf membutuhkan revisi kelengkapan."""
     data = _gemini_json(
         _SYSTEM,
-        f"{_context(surat_req)}\n\nPesan mahasiswa: (belum ada) Berikan panduan awal apa saja yang harus direvisi "
-        "dan beri tahu cara mengajukan ulang (balas dengan perbaikan, lalu ketik 'ajukan ulang').",
+        f"{_context(surat_req)}\n\nPesan mahasiswa: (belum ada) Berikan panduan awal apa saja yang harus dilengkapi/direvisi "
+        "dan beri tahu cara memproses ulang (balas dengan perbaikan, lalu ketik 'terbitkan ulang').",
     )
     if data and data.get("reply"):
         return strip_emojis(str(data["reply"]))
     return strip_emojis(
         f"Yang perlu kamu perbaiki: {latest_revision_note(surat_req)}\n\n"
         "Balas di sini dengan perbaikan yang kamu inginkan (misalnya data yang diubah), "
-        "lalu ketik \"ajukan ulang\" supaya surat disusun ulang dan dikirim kembali ke dosen."
+        "lalu ketik \"terbitkan ulang\" supaya surat disusun ulang dan langsung diterbitkan otomatis."
     )
 
 
@@ -231,22 +231,22 @@ def handle_revision_message(surat_req, thread, user_message: str) -> str:
             return reply
         if QUESTION_PATTERN.search(msg):
             return strip_emojis(
-                f"Catatan dosen: {note}\n\nArtinya data permohonanmu perlu disesuaikan dengan catatan itu. "
-                "Tulis perbaikan yang kamu mau (misalnya nilai/tanggal/detail baru), lalu ketik \"ajukan ulang\"."
+                f"Catatan perbaikan: {note}\n\nArtinya data permohonanmu perlu disesuaikan dengan catatan itu. "
+                "Tulis perbaikan yang kamu mau (misalnya nilai/tanggal/detail baru), lalu ketik \"terbitkan ulang\"."
             )
         return strip_emojis(
             f"Oke, perbaikan kamu saya catat: \"{msg}\".\n"
-            "Kalau sudah cukup, ketik \"ajukan ulang\" supaya surat disusun ulang dan dikirim kembali ke dosen."
+            "Kalau sudah cukup, ketik \"terbitkan ulang\" supaya surat disusun ulang dan langsung diterbitkan otomatis."
         )
 
     corrections = [p for p in prior if not RESUBMIT_PATTERN.search(p)]
     if not wants_resubmit:
         corrections.append(msg)
-    instruction = summary or "; ".join(corrections) or f"Perbaiki sesuai catatan dosen: {note}"
+    instruction = summary or "; ".join(corrections) or f"Perbaiki sesuai catatan: {note}"
     if note and note not in instruction:
-        instruction = f"{instruction}. Catatan dosen yang harus dipenuhi: {note}"
+        instruction = f"{instruction}. Catatan perbaikan yang harus dipenuhi: {note}"
     _start_redraft(surat_req, instruction)
     return strip_emojis(
-        "Baik, revisi kamu sudah saya terapkan. Surat sedang disusun ulang dan akan masuk lagi ke dosen untuk "
-        "persetujuan. Pantau statusnya di kartu surat atau lewat notifikasi."
+        "Baik, revisi kamu sudah saya terapkan. Surat sedang disusun ulang untuk segera diterbitkan otomatis. "
+        "Pantau statusnya di kartu surat atau lewat notifikasi."
     )

@@ -18,13 +18,13 @@ export const LecturerSidebar: React.FC<LecturerSidebarProps> = ({
   onSelectRequest,
   onLogout,
 }) => {
-  const pendingList = requests.filter((r) =>
-    ["PENDING_APPROVAL", "IN_REVIEW", "SUBMITTED"].includes(r.status),
-  );
-  const processedList = requests.filter((r) =>
-    ["APPROVED", "SENT", "PRINTED", "REJECTED", "REVISION_REQUIRED"].includes(
+  const inProgressList = requests.filter((r) =>
+    ["PENDING_APPROVAL", "IN_REVIEW", "SUBMITTED", "REVISION_REQUIRED"].includes(
       r.status,
     ),
+  );
+  const issuedList = requests.filter((r) =>
+    ["APPROVED", "SENT", "PRINTED", "REJECTED", "FAILED"].includes(r.status),
   );
 
   return (
@@ -37,30 +37,30 @@ export const LecturerSidebar: React.FC<LecturerSidebarProps> = ({
             ASURA Dosen
           </span>
           <span className="text-[10px] text-[#857870] block">
-            Dashboard Persetujuan Surat
+            Monitoring &amp; Arsip Surat (Read-Only)
           </span>
         </div>
       </div>
 
-      {/* Riwayat Surat Masuk (Untuk Di-ACC & Sudah Di-ACC) */}
+      {/* Riwayat Surat Kampus (Diproses & Terbit) */}
       <div className="flex-1 overflow-y-auto p-3.5 space-y-5">
         <div>
           <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[#d76b3e] mb-2 px-1">
             <span className="flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5" />
-              Surat Untuk Di-ACC
+              Sedang Diproses Sistem
             </span>
             <span className="px-2 py-0.5 rounded-full bg-[#d76b3e]/15 text-[#d76b3e]">
-              {pendingList.length}
+              {inProgressList.length}
             </span>
           </div>
           <div className="space-y-1.5">
-            {pendingList.length === 0 ? (
+            {inProgressList.length === 0 ? (
               <p className="text-[11px] text-[#857870] px-2 py-2">
-                Tidak ada surat menunggu ACC.
+                Tidak ada surat yang sedang diproses.
               </p>
             ) : (
-              pendingList.map((req) => (
+              inProgressList.map((req) => (
                 <button
                   key={req.id}
                   type="button"
@@ -87,19 +87,19 @@ export const LecturerSidebar: React.FC<LecturerSidebarProps> = ({
           <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[#857870] mb-2 px-1">
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              Sudah Di-ACC / Diproses
+              Arsip Surat Terbit
             </span>
             <span className="px-2 py-0.5 rounded-full bg-white border border-[#eadfd7] text-[#857870]">
-              {processedList.length}
+              {issuedList.length}
             </span>
           </div>
           <div className="space-y-1.5">
-            {processedList.length === 0 ? (
+            {issuedList.length === 0 ? (
               <p className="text-[11px] text-[#857870] px-2 py-2">
-                Belum ada surat yang diproses.
+                Belum ada arsip surat terbit.
               </p>
             ) : (
-              processedList.map((req) => (
+              issuedList.map((req) => (
                 <button
                   key={req.id}
                   type="button"

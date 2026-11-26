@@ -250,8 +250,6 @@ TELEGRAM_BOT_TOKEN = _load_live_env_var('TELEGRAM_BOT_TOKEN')
 PUBLIC_VERIFY_BASE_URL = _load_live_env_var('PUBLIC_VERIFY_BASE_URL', 'https://auto-surat-backend.onrender.com').rstrip('/')
 
 # ==============================================================================
-# KONFIGURASI DEMO ONE-STEP APPROVAL (NON-DESTRUCTIVE INTERCEPTOR)
+# KONFIGURASI ALUR PENERBITAN SURAT OTOMATIS (V2: TANPA GATE APPROVAL DOSEN)
 # ==============================================================================
-DEMO_ONE_STEP_APPROVAL = os.environ.get('DEMO_ONE_STEP_APPROVAL', 'False').lower() == 'true'
-DEMO_APPROVER_NIP = os.environ.get('DEMO_APPROVER_NIP', '198001012005011001')
-DEMO_TARGET_SURAT = ['SR-MAG', 'SR-BEA']
+REQUIRE_MANUAL_APPROVAL = _load_live_env_var('REQUIRE_MANUAL_APPROVAL', 'False').lower() == 'true'

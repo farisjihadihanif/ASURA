@@ -54,20 +54,12 @@ def process_approval_action(
         return {"error": "Antrean approval tidak ditemukan."}, 404
 
     surat_req = approval_step.surat_request
-
-    demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', False)
-    demo_target_surat = getattr(settings, 'DEMO_TARGET_SURAT', ['SR-MAG', 'SR-BEA', 'SP-MAG', 'SI-MAG', 'SK-KUL'])
-    demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
-    lecturer_nip = getattr(getattr(lecturer, 'user', None), 'nip_nim', None)
     lecturer_nama = getattr(getattr(lecturer, 'user', None), 'nama', '')
-    # Hanya akun pejabat resmi (NIP demo) yang boleh melewati pengecekan antrean.
-    # Dosen lain hanya bisa memproses antrean yang memang ditugaskan kepadanya.
-    is_demo_bypass = bool(demo_enabled and lecturer_nip == demo_approver_nip)
 
-    if not is_demo_bypass and approval_step.approver != lecturer:
+    if approval_step.approver != lecturer:
         return {"error": "Anda tidak memiliki hak akses untuk menyetujui antrean ini."}, 403
 
-    if not is_demo_bypass and approval_step.status != 'PENDING':
+    if approval_step.status != 'PENDING':
         return {"error": "Langkah persetujuan ini belum aktif atau sudah diproses sebelumnya."}, 400
 
     if action == 'REVISION_REQUIRED':
@@ -139,12 +131,10 @@ def process_approval_action(
         if isinstance(final_approved_content, str) and final_approved_content.strip():
             surat_req.final_approved_content = final_approved_content.strip()
 
-        next_step = None
-        if not is_demo_bypass:
-            next_step = SuratApproval.objects.filter(
-                surat_request=surat_req,
-                step_order=approval_step.step_order + 1,
-            ).first()
+        next_step = SuratApproval.objects.filter(
+            surat_request=surat_req,
+            step_order=approval_step.step_order + 1,
+        ).first()
 
         if next_step:
             next_step.status = 'PENDING'
@@ -248,6 +238,9 @@ def _execute_final_issuance_worker(
         ).get(pk=surat_request_id)
 
         signer = Lecturer.objects.filter(pk=signer_lecturer_id).first() if signer_lecturer_id else None
+        if signer is None:
+            from .manual_handlers import resolve_official_approver
+            signer = resolve_official_approver(surat_req.student, surat_req.kode_surat.kode_surat)
         resolved_content = surat_req.final_approved_content or surat_req.ai_original_draft or ""
 
         tools = SuratExecutionTools()
@@ -261,7 +254,11 @@ def _execute_final_issuance_worker(
         surat_req.status = "APPROVED"
         surat_req.save(update_fields=["status"])
 
-        if surat_req.ai_original_draft and surat_req.final_approved_content:
+        if (
+            surat_req.ai_original_draft
+            and surat_req.final_approved_content
+            and surat_req.ai_original_draft.strip() != surat_req.final_approved_content.strip()
+        ):
             try:
                 from ..agents.memory_agent import AgenticMemoryAgent
                 mem_agent = AgenticMemoryAgent()
@@ -276,16 +273,17 @@ def _execute_final_issuance_worker(
 
         signer_display = (
             (surat_req.signer_nama_override or "").strip()
-            or getattr(getattr(signer, 'user', None), 'nama', 'Dosen / Pejabat Berwenang')
+            or getattr(getattr(signer, 'user', None), 'nama', 'Pejabat Berwenang Kampus')
         )
         notif_body = (
             f"{surat_req.kode_surat.nama_surat} (No. {pipeline_result.nomor_surat_resmi}) "
-            f"telah di-ACC oleh {signer_display}. Buka sesi chat untuk mengirim ke Email atau mencetak ke Printer."
+            f"telah diterbitkan otomatis (penandatangan: {signer_display}). "
+            f"Buka sesi chat untuk melihat PDF, mengirim ke Email, atau mencetak ke Printer."
         )
         notify_user(
             surat_req.student.user,
             'APPROVED',
-            f'Surat Di-ACC: {surat_req.kode_surat.nama_surat}',
+            f'Surat Terbit: {surat_req.kode_surat.nama_surat}',
             notif_body,
             surat_req,
         )
@@ -295,10 +293,11 @@ def _execute_final_issuance_worker(
                 thread=surat_req.chat_thread,
                 sender="assistant",
                 message=(
-                    f"✅ **Surat Anda Telah Di-ACC oleh {signer_display}!**\n\n"
+                    f"**Surat Resmi Anda Telah Terbit ({pipeline_result.nomor_surat_resmi})**\n\n"
                     f"- **Jenis Surat:** {surat_req.kode_surat.nama_surat}\n"
-                    f"- **Nomor Resmi:** `{pipeline_result.nomor_surat_resmi}`\n\n"
-                    f"Silakan pilih tindakan selanjutnya di bawah ini: **Kirim ke Email** atau **Cetak ke Printer**."
+                    f"- **Nomor Resmi:** `{pipeline_result.nomor_surat_resmi}`\n"
+                    f"- **Penandatangan:** {signer_display}\n\n"
+                    f"Silakan pilih tindakan selanjutnya di bawah ini: **Lihat PDF**, **Kirim ke Email**, atau **Cetak ke Printer**."
                 ),
                 slots_snapshot={
                     "event": "SURAT_APPROVED",

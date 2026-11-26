@@ -440,8 +440,16 @@ def install_backend_integration_bridges() -> None:
                     except Exception:
                         pass
 
-                # Jika status mencapai PENDING_APPROVAL, pastikan antrean SuratApproval dibuat
-                if getattr(self, "status", None) == SuratStatus.PENDING_APPROVAL:
+                # Antrean SuratApproval otomatis hanya dibuat bila REQUIRE_MANUAL_APPROVAL=True
+                require_manual = False
+                try:
+                    from django.conf import settings as django_settings
+                    if getattr(django_settings, "configured", False):
+                        require_manual = bool(getattr(django_settings, "REQUIRE_MANUAL_APPROVAL", False))
+                except Exception:
+                    require_manual = False
+
+                if require_manual and getattr(self, "status", None) == SuratStatus.PENDING_APPROVAL:
                     ensure_approval_queue_for_request(self)
 
                 return result

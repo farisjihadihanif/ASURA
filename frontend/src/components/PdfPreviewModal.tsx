@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, Printer, Loader2, CheckCircle2 } from 'lucide-react';
 import suratService from '../services/suratService';
 interface PdfPreviewModalProps {
