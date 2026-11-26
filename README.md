@@ -19,7 +19,7 @@ Prasyarat: Python 3.11+, Node.js 20+.
 ```powershell
 cd backend-django
 copy .env.example .env      # isi GEMINI_API_KEY (opsional untuk uji tanpa AI)
-.\run-local.ps1             # venv, migrate, seed_surat, seed_master_data, jalankan server :8000
+.\run-local.ps1             # venv, migrate, seed_master_data, jalankan server :8000
 ```
 
 Web:
@@ -57,7 +57,7 @@ Frontend: `VITE_API_BASE_URL`. Desktop: `ASURA_API_BASE_URL`.
 
 ## Deploy ringkas
 
-1. **Backend**: Render (Docker, `backend-django/Dockerfile`, port 8000) + Supabase Postgres. Set env di atas, lalu jalankan sekali: `python manage.py migrate && python manage.py seed_surat && python manage.py seed_master_data --skip-if-seeded`.
+1. **Backend**: Render (Docker, `backend-django/Dockerfile`, port 8000) + Supabase Postgres. Set env di atas, lalu jalankan sekali: `python manage.py migrate && python manage.py seed_master_data --skip-if-seeded`.
 2. **Frontend**: build `npm run build` dengan `VITE_API_BASE_URL` menunjuk ke backend; host di Vercel/Netlify/Render Static. Tambahkan domainnya ke `CORS_ALLOWED_ORIGINS`.
 3. **Desktop**: set `ASURA_API_BASE_URL` ke backend produksi lalu `npm run dist`.
 4. URL verifikasi QR memakai `https://auto-surat-backend.onrender.com/surat/verify/<token>/`; sesuaikan bila domain backend berubah.

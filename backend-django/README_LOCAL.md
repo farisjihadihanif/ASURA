@@ -22,7 +22,7 @@ Lanjutkan:
 
 ```powershell
 python manage.py migrate
-python manage.py seed_data
+python manage.py seed_master_data
 python manage.py runserver 8000
 ```
 

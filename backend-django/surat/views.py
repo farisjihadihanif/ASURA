@@ -7,9 +7,6 @@ from typing import Any, Dict, Optional
 
 from django.conf import settings
 from django.db import close_old_connections
-from django.http import FileResponse, Http404
-from django.utils.decorators import method_decorator
-from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import permissions, status
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -20,7 +17,6 @@ from accounts.authentication import CustomJWTAuthentication
 from accounts.models import Lecturer, Student
 
 from .agents.backend_bridge import persist_attachments_for_request
-from .agents.execution_tools import SuratExecutionTools
 from .agents.letter_agent import (
     SuratAgentError,
     SuratAgentRateLimitError,
@@ -47,7 +43,7 @@ from .serializers import (
     SuratTypeSerializer,
     ReDraftSuratRequestSerializer,
 )
-from .services.workflow_service import process_approval_action, route_and_distribute_document
+from .services.workflow_service import process_approval_action
 from .services.manual_handlers import create_approval_workflow_for_request
 from .services.session_manager import AutoSuratSessionManager
 from .services.notifications import notify_user
@@ -762,61 +758,6 @@ class SuratRequestCreateAPIView(APIView):
         try:
             student_obj = request.user.student_profile
         except (Student.DoesNotExist, AttributeError):
-            # === ASURA_CUSTOM_SELF_SIGNED_BYPASS ===
-            try:
-                _created_id = None
-                if 'surat_request' in locals() and surat_request is not None:
-                    _created_id = surat_request.id
-                elif 'req_obj' in locals() and req_obj is not None:
-                    _created_id = req_obj.id
-                _sr_custom = SuratRequest.objects.select_related('student', 'student__user', 'student__prodi', 'student__fakultas', 'kode_surat').filter(pk=_created_id).first() if _created_id else None
-                if _sr_custom and str(_sr_custom.kode_surat.kode_surat or '').upper().startswith('CUSTOM'):
-                    from .models import SuratApproval as _SA_Custom, ChatThread as _CT_Custom, ChatMessage as _CM_Custom
-                    from .services.custom_letter_ai import generate_custom_letter_body
-                    from .services.pdf_generator_safe import generate_and_save_official_pdf as _gen_custom_pdf
-                    _SA_Custom.objects.filter(surat_request=_sr_custom).delete()
-                    _pdata = dict(_sr_custom.payload_data or {})
-                    _pdata['_is_custom_personal'] = True
-                    _custom_body = generate_custom_letter_body(
-                        student=_sr_custom.student,
-                        payload_data=_pdata,
-                        user_prompt_context=_sr_custom.user_prompt_context,
-                    )
-                    _sr_custom.ai_original_draft = _custom_body
-                    _sr_custom.final_approved_content = _custom_body
-                    _sr_custom.status = SuratStatus.APPROVED
-                    _sr_custom.nomor_surat_resmi = f'CUSTOM/{_sr_custom.id:03d}/2026'
-                    _sr_custom.payload_data = _pdata
-                    _sr_custom.save()
-                    _gen_custom_pdf({
-                        'id': _sr_custom.id,
-                        'surat_request_id': _sr_custom.id,
-                        'kode_surat': 'CUSTOM-UMUM',
-                        'is_custom_personal': True,
-                        'nomor_surat': _sr_custom.nomor_surat_resmi,
-                        'nama_surat': _pdata.get('judul_surat') or _sr_custom.kode_surat.nama_surat or 'Surat Custom',
-                        'nama_mahasiswa': _sr_custom.student.user.nama,
-                        'nim': _sr_custom.student.nim,
-                        'program_studi': getattr(getattr(_sr_custom.student, 'prodi', None), 'nama_prodi', None) or 'Informatika',
-                        'fakultas': getattr(getattr(_sr_custom.student, 'fakultas', None), 'nama_fakultas', None) or 'Teknik',
-                        'final_approved_content': _custom_body,
-                        'isi_surat': _custom_body,
-                        'payload': _pdata,
-                    })
-                    _th_c = _CT_Custom.objects.filter(latest_surat_request=_sr_custom).first()
-                    if _th_c:
-                        _last_m = _th_c.messages.filter(sender='assistant').order_by('-created_at').first()
-                        _ready_msg = (
-                            f"Surat custom **{_pdata.get('judul_surat') or 'Surat Pribadi'}** sudah selesai disusun atas nama dan tanda tangan kamu sendiri (tanpa perlu persetujuan dosen).\n\n"
-                            "Kamu bisa langsung memasang gambar tanda tanganmu lewat tombol Upload TTD Saya, mengirim ke Email, atau mencetak ke Printer."
-                        )
-                        if _last_m:
-                            _last_m.message = _ready_msg
-                            _last_m.save(update_fields=['message'])
-                        else:
-                            _CM_Custom.objects.create(thread=_th_c, sender='assistant', message=_ready_msg)
-            except Exception:
-                pass
             return Response(
                 {"status": "error", "message": "Validasi gagal", "errors": "Hanya mahasiswa yang dapat mengajukan surat."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1070,116 +1011,6 @@ class LecturerApprovalActionAPIView(APIView):
         return Response(result_data, status=http_code)
 
 
-class SuratDeliverEmailAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    authentication_classes = [CustomJWTAuthentication]
-
-    def post(self, request, pk: int):
-        try:
-            student_obj = request.user.student_profile
-        except (Student.DoesNotExist, AttributeError):
-            return Response({"error": "Hanya akun mahasiswa yang dapat mengirim surat."}, status=status.HTTP_403_FORBIDDEN)
-
-        surat_req = SuratRequest.objects.select_related("kode_surat", "chat_thread").filter(pk=pk, student=student_obj).first()
-        if not surat_req:
-            return Response({"error": "Permohonan surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
-
-        if surat_req.status not in [SuratStatus.APPROVED, SuratStatus.SENT, SuratStatus.PRINTED]:
-            return Response(
-                {"error": "Surat belum mendapatkan ACC dari dosen sehingga belum dapat dikirim ke email."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        recipient_email = str(request.data.get("recipient_email") or "").strip()
-        if not recipient_email or "@" not in recipient_email:
-            return Response({"error": "Alamat email tujuan wajib diisi dengan format yang valid."}, status=status.HTTP_400_BAD_REQUEST)
-
-        surat_req.chosen_destination = "email"
-        surat_req.target_destination_address = recipient_email
-        surat_req.save(update_fields=["chosen_destination", "target_destination_address"])
-
-        try:
-            dist_res = route_and_distribute_document(surat_req)
-            if isinstance(dist_res, dict) and dist_res.get("status") == "ERROR":
-                raise RuntimeError(dist_res.get("message", "Gagal mengirim email."))
-            surat_req.status = SuratStatus.SENT
-            surat_req.save(update_fields=["status"])
-            SuratAuditLog.objects.create(
-                surat_request=surat_req,
-                action_id="DIST_EMAIL",
-                action=f"SENT_TO_EMAIL_{recipient_email}"[:255],
-            )
-            if surat_req.chat_thread:
-                ChatMessage.objects.create(
-                    thread=surat_req.chat_thread,
-                    sender="assistant",
-                    message=f"✉️ Dokumen resmi **{surat_req.kode_surat.nama_surat}** (No. `{surat_req.nomor_surat_resmi}`) berhasil dikirim ke email **{recipient_email}**.",
-                    slots_snapshot={"event": "SURAT_SENT", "surat_request_id": surat_req.id, "recipient_email": recipient_email},
-                )
-                surat_req.chat_thread.save(update_fields=["updated_at"])
-            return Response(
-                {
-                    "status": "success",
-                    "message": f"Surat berhasil dikirim ke {recipient_email}.",
-                    "surat_status": surat_req.status,
-                    "recipient_email": recipient_email,
-                },
-                status=status.HTTP_200_OK,
-            )
-        except Exception as exc:
-            return Response(
-                {"error": f"Gagal mengirim email ke {recipient_email}: {exc}"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-
-class SuratMarkPrintedAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    authentication_classes = [CustomJWTAuthentication]
-
-    def post(self, request, pk: int):
-        try:
-            student_obj = request.user.student_profile
-        except (Student.DoesNotExist, AttributeError):
-            return Response({"error": "Hanya akun mahasiswa yang dapat mencetak surat."}, status=status.HTTP_403_FORBIDDEN)
-
-        surat_req = SuratRequest.objects.select_related("kode_surat", "chat_thread").filter(pk=pk, student=student_obj).first()
-        if not surat_req:
-            return Response({"error": "Permohonan surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
-
-        if surat_req.status not in [SuratStatus.APPROVED, SuratStatus.SENT, SuratStatus.PRINTED]:
-            return Response(
-                {"error": "Surat belum mendapatkan ACC dari dosen sehingga belum dapat dicetak."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        surat_req.status = SuratStatus.PRINTED
-        surat_req.save(update_fields=["status"])
-        SuratAuditLog.objects.create(
-            surat_request=surat_req,
-            action_id="PRINT_01",
-            action="PRINTED_BY_STUDENT_VIA_CHAT",
-        )
-        if surat_req.chat_thread:
-            ChatMessage.objects.create(
-                thread=surat_req.chat_thread,
-                sender="assistant",
-                message=f"🖨️ Dokumen resmi **{surat_req.kode_surat.nama_surat}** (No. `{surat_req.nomor_surat_resmi}`) telah disiapkan untuk dicetak ke printer.",
-                slots_snapshot={"event": "SURAT_PRINTED", "surat_request_id": surat_req.id},
-            )
-            surat_req.chat_thread.save(update_fields=["updated_at"])
-
-        return Response(
-            {
-                "status": "success",
-                "message": "Dokumen siap dicetak ke printer.",
-                "surat_status": surat_req.status,
-                "preview_pdf_url": f"/api/surat/requests/{surat_req.id}/preview-pdf/",
-            },
-            status=status.HTTP_200_OK,
-        )
-
-
 class SuratVerifyAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -1235,156 +1066,3 @@ class SuratVerifyAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
-
-@method_decorator(xframe_options_exempt, name='dispatch')
-class SuratPreviewPdfAPIView(APIView):
-    permission_classes = [permissions.AllowAny]
-    def get(self, request, pk: int):
-        try:
-            surat_req = SuratRequest.objects.select_related(
-                'student',
-                'student__user',
-                'student__prodi',
-                'student__fakultas',
-                'kode_surat',
-            ).get(pk=pk)
-        except SuratRequest.DoesNotExist:
-            raise Http404("Surat tidak ditemukan.")
-        pdf_dir = os.path.join(settings.BASE_DIR, "media", "generated_pdf")
-        os.makedirs(pdf_dir, exist_ok=True)
-        nomor_clean = str(surat_req.nomor_surat_resmi or f"req_{pk}").replace("/", "_")
-        possible_files = [
-            os.path.join(pdf_dir, f"surat_{pk}.pdf"),
-            os.path.join(pdf_dir, f"surat_{nomor_clean}.pdf"),
-        ]
-        found_path = None
-        for p in possible_files:
-            if os.path.exists(p) and os.path.getsize(p) > 0:
-                found_path = p
-                break
-        if not found_path:
-            from .services.pdf_generator_safe import generate_and_save_official_pdf
-            student = surat_req.student
-            prodi_nama = getattr(getattr(student, "prodi", None), "nama_prodi", None) or "Teknik Informatika"
-            fakultas_nama = getattr(getattr(student, "fakultas", None), "nama_fakultas", None) or "Sains dan Teknologi"
-            nomor_resmi = surat_req.nomor_surat_resmi or f"{pk:03d}/{surat_req.kode_surat.kode_surat}/FT/2026"
-            effective_content = (
-                (surat_req.final_approved_content or "").strip()
-                or (surat_req.ai_original_draft or "").strip()
-                or f"Dengan ini menerangkan bahwa {student.user.nama} (NIM {student.nim}) mengajukan {surat_req.kode_surat.nama_surat}."
-            )
-            generate_and_save_official_pdf({
-                "id": surat_req.id,
-                "surat_request_id": surat_req.id,
-                "nomor_surat": nomor_resmi,
-                "nama_surat": surat_req.kode_surat.nama_surat,
-                "nama_mahasiswa": student.user.nama,
-                "nim": student.nim,
-                "program_studi": prodi_nama,
-                "fakultas": fakultas_nama,
-                "semester_aktif": getattr(student, "semester_aktif", "-"),
-                "tahun_akademik": getattr(student, "tahun_akademik", "-"),
-                "final_approved_content": effective_content,
-                "isi_surat": effective_content,
-                "payload": surat_req.payload_data or {},
-                "qr_verification_code": surat_req.qr_verification_code or nomor_resmi,
-            })
-            for p in possible_files:
-                if os.path.exists(p) and os.path.getsize(p) > 0:
-                    found_path = p
-                    break
-        if not found_path or not os.path.exists(found_path):
-            raise Http404("Berkas PDF dokumen belum tersedia untuk surat ini.")
-        if request.query_params.get("format") == "base64":
-            import base64
-            with open(found_path, "rb") as f_bin:
-                b64_str = base64.b64encode(f_bin.read()).decode("ascii")
-            return Response(
-                {
-                    "pdf_base64": b64_str,
-                    "filename": f"surat_{nomor_clean}.pdf",
-                },
-                status=status.HTTP_200_OK,
-            )
-        response = FileResponse(open(found_path, "rb"), content_type="application/pdf")
-        response["Content-Disposition"] = f'inline; filename="surat_{nomor_clean}.pdf"'
-        response.headers.pop("X-Frame-Options", None)
-        response["Content-Security-Policy"] = "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
-        return response
-class SuratDownloadPdfAPIView(APIView):
-    permission_classes = [permissions.AllowAny]
-    def get(self, request, pk: int):
-        preview_resp = SuratPreviewPdfAPIView().get(request, pk)
-        if hasattr(preview_resp, "headers"):
-            nomor_clean = f"req_{pk}"
-            preview_resp["Content-Disposition"] = f'attachment; filename="surat_{nomor_clean}.pdf"'
-        return preview_resp
-
-# === OVERRIDE FINAL: PREVIEW & DOWNLOAD PDF ANTI-404 ===
-@method_decorator(xframe_options_exempt, name='dispatch')
-class SuratPreviewPdfAPIView(APIView):
-    permission_classes = [permissions.AllowAny]
-    def get(self, request, pk: int):
-        import base64
-        from django.http import HttpResponse
-        from .services.pdf_generator_safe import generate_and_save_official_pdf
-        surat_req = SuratRequest.objects.select_related(
-            'student',
-            'student__user',
-            'student__prodi',
-            'student__fakultas',
-            'kode_surat',
-        ).filter(pk=pk).first()
-        if not surat_req:
-            return Response({"error": "Surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
-        pdf_dir = os.path.join(settings.BASE_DIR, "media", "generated_pdf")
-        os.makedirs(pdf_dir, exist_ok=True)
-        nomor_clean = str(surat_req.nomor_surat_resmi or f"req_{pk}").replace("/", "_")
-        target_pdf = os.path.join(pdf_dir, f"surat_{pk}.pdf")
-        if not (os.path.exists(target_pdf) and os.path.getsize(target_pdf) > 0):
-            student = surat_req.student
-            prodi_nama = getattr(getattr(student, "prodi", None), "nama_prodi", None) or "Teknik Informatika"
-            fakultas_nama = getattr(getattr(student, "fakultas", None), "nama_fakultas", None) or "Sains dan Teknologi"
-            nomor_resmi = surat_req.nomor_surat_resmi or f"{pk:03d}/{surat_req.kode_surat.kode_surat}/FT/2026"
-            effective_content = (
-                (surat_req.final_approved_content or "").strip()
-                or (surat_req.ai_original_draft or "").strip()
-                or f"Dengan ini menerangkan bahwa {student.user.nama} (NIM {student.nim}) mengajukan {surat_req.kode_surat.nama_surat}."
-            )
-            generate_and_save_official_pdf({
-                "id": surat_req.id,
-                "surat_request_id": surat_req.id,
-                "nomor_surat": nomor_resmi,
-                "nama_surat": surat_req.kode_surat.nama_surat,
-                "nama_mahasiswa": student.user.nama,
-                "nim": student.nim,
-                "program_studi": prodi_nama,
-                "fakultas": fakultas_nama,
-                "semester_aktif": getattr(student, "semester_aktif", "-"),
-                "tahun_akademik": getattr(student, "tahun_akademik", "-"),
-                "final_approved_content": effective_content,
-                "isi_surat": effective_content,
-                "payload": surat_req.payload_data or {},
-                "qr_verification_code": surat_req.qr_verification_code or nomor_resmi,
-            })
-        with open(target_pdf, "rb") as f_pdf:
-            pdf_bytes = f_pdf.read()
-        if request.query_params.get("format") == "base64":
-            return Response(
-                {
-                    "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-                    "filename": f"surat_{nomor_clean}.pdf",
-                },
-                status=status.HTTP_200_OK,
-            )
-        resp = HttpResponse(pdf_bytes, content_type="application/pdf")
-        resp["Content-Disposition"] = f'inline; filename="surat_{nomor_clean}.pdf"'
-        resp["Content-Security-Policy"] = "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
-        return resp
-class SuratDownloadPdfAPIView(APIView):
-    permission_classes = [permissions.AllowAny]
-    def get(self, request, pk: int):
-        resp = SuratPreviewPdfAPIView().get(request, pk)
-        if hasattr(resp, "headers") and "Content-Disposition" in resp:
-            resp["Content-Disposition"] = resp["Content-Disposition"].replace("inline;", "attachment;")
-        return resp

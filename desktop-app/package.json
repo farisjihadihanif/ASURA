@@ -23,7 +23,6 @@
       "preload.js",
       "index.html",
       "renderer.js",
-      "styles.css",
       "assets/**/*"
     ],
     "win": {

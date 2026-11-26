@@ -124,11 +124,3 @@ class RegisterAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
-# Dipertahankan agar import lama tidak rusak; opsi kini tidak dipakai lagi oleh form daftar.
-class RegisterOptionsAPIView(APIView):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-
-    def get(self, request):
-        return Response({"faculties": [], "departments": []})

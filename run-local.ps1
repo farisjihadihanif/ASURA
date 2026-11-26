@@ -21,7 +21,6 @@ if (-not (Test-Path $VenvPython)) {
 }
 Push-Location $BackendDir
 & $VenvPython manage.py migrate --noinput
-& $VenvPython manage.py seed_surat
 & $VenvPython manage.py seed_master_data --skip-if-seeded
 Pop-Location
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$BackendDir'; `$env:DEBUG='True'; Remove-Item Env:DATABASE_URL,Env:REDIS_URL -ErrorAction SilentlyContinue; & '$VenvPython' manage.py runserver 127.0.0.1:8000"
