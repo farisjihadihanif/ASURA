@@ -11,7 +11,7 @@ from .chat_workflow import handle_incoming_chat_with_redis
 logger = logging.getLogger(__name__)
 
 class AutoSuratSessionManager:
-    TTL_SECONDS = 1800  # 30 Menit Sliding TTL
+    TTL_SECONDS = 1800  # 30 Menit 
 
     @staticmethod
     def _get_redis_key(thread_id: str) -> str:
