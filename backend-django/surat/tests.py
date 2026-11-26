@@ -1267,3 +1267,391 @@ class V2DirectAutoIssuanceTestCase(TestCase):
 
         # Lecturer preview PDF blocked for out-of-scope faculty letter
         self.assertEqual(self.client.get(f"/api/surat/requests/{req_si.id}/preview-pdf/").status_code, 403)
+
+
+class V2AiDraftCalibrationAndLecturerLetterTestCase(TestCase):
+    """
+    Memverifikasi:
+    1. Menu Draft Surat AI (maks 5 draf terakhir per kode_surat, filter kategori, scoping prodi/fakultas, blokir CUSTOM & STUDENT).
+    2. Kalibrasi draf AI melatih AgentFeedbackMemory (termasuk reference_draft) tanpa mengubah PDF/TTE historis mahasiswa,
+       plus toggle aktif/nonaktif memori memengaruhi SuratDraftingAgent.
+    3. Akun LECTURER dapat membuat surat resmi maupun surat custom pribadi dengan alur otomatis yang sama seperti mahasiswa.
+    """
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        self.user_dekan = User.objects.create(
+            id="u-cal-dekan",
+            nama="Prof. Cal Dekan",
+            nip_nim="197001011998011001",
+            role="LECTURER",
+            email="dekan.cal@example.ac.id",
+            password="pass",
+        )
+        self.user_kaprodi = User.objects.create(
+            id="u-cal-kaprodi",
+            nama="Dr. Cal Kaprodi INF",
+            nip_nim="198202022006011002",
+            role="LECTURER",
+            email="kaprodi.cal@example.ac.id",
+            password="pass",
+        )
+        self.user_mhs_inf = User.objects.create(
+            id="u-cal-mhs-inf",
+            nama="Ayu Informatika",
+            nip_nim="210004001",
+            role="STUDENT",
+            email="ayu.cal@example.ac.id",
+            password="pass",
+        )
+        self.user_mhs_si = User.objects.create(
+            id="u-cal-mhs-si",
+            nama="Bagas Akuntansi",
+            nip_nim="210004002",
+            role="STUDENT",
+            email="bagas.cal@example.ac.id",
+            password="pass",
+        )
+
+        self.fak_ft = Faculty.objects.create(id="FT-CAL", nama_fakultas="Fakultas Teknik")
+        self.fak_feb = Faculty.objects.create(id="FEB-CAL", nama_fakultas="Fakultas Ekonomi")
+        self.prodi_inf = Department.objects.create(id="INF-CAL", fakultas=self.fak_ft, nama_prodi="Informatika")
+        self.prodi_si = Department.objects.create(id="SI-CAL", fakultas=self.fak_feb, nama_prodi="Akuntansi")
+
+        self.lec_dekan = Lecturer.objects.create(
+            id="l-cal-dekan",
+            user=self.user_dekan,
+            fakultas=self.fak_ft,
+            prodi=self.prodi_inf,
+            jabatan_struktural=["Dekan Fakultas Teknik"],
+        )
+        self.lec_kaprodi = Lecturer.objects.create(
+            id="l-cal-kaprodi",
+            user=self.user_kaprodi,
+            fakultas=self.fak_ft,
+            prodi=self.prodi_inf,
+            jabatan_struktural=["Ketua Program Studi Informatika"],
+        )
+        self.fak_ft.dekan = self.lec_dekan
+        self.fak_ft.save()
+        self.prodi_inf.kaprodi = self.lec_kaprodi
+        self.prodi_inf.save()
+
+        self.student_inf = Student.objects.create(
+            nim="210004001",
+            user=self.user_mhs_inf,
+            fakultas=self.fak_ft,
+            prodi=self.prodi_inf,
+            semester_aktif=7,
+            tahun_akademik="2026/2027",
+            tahun_masuk=2022,
+            total_sks_lulus=110,
+            ipk_kumulatif=3.70,
+        )
+        self.student_si = Student.objects.create(
+            nim="210004002",
+            user=self.user_mhs_si,
+            fakultas=self.fak_feb,
+            prodi=self.prodi_si,
+            semester_aktif=5,
+            tahun_akademik="2026/2027",
+            tahun_masuk=2023,
+        )
+
+        from surat.services.campus_catalog import ensure_campus_surat_types
+        ensure_campus_surat_types()
+        self.type_simag = SuratType.objects.get(kode_surat="SI-MAG")
+        self.type_skmk = SuratType.objects.get(kode_surat="SK-MK")
+        self.type_custom = SuratType.objects.get(kode_surat="CUSTOM-UMUM")
+
+    def test_ai_drafts_returns_max_five_per_type_scoped_and_blocks_student(self):
+        created_inf_ids = []
+        for idx in range(7):
+            req = SuratRequest.objects.create(
+                student=self.student_inf,
+                kode_surat=self.type_simag,
+                status=SuratStatus.APPROVED,
+                nomor_surat_resmi=f"0{idx+1}/SI-MAG/FT/2026",
+                ai_original_draft=f"Draf AI SI-MAG ke-{idx+1}",
+                final_approved_content=f"Draf AI SI-MAG ke-{idx+1}",
+                self_critique_score=8,
+                payload_data={"instansi_tujuan": f"Perusahaan {idx+1}"},
+            )
+            created_inf_ids.append(req.id)
+
+        # Out-of-scope FEB letter and private CUSTOM letter
+        SuratRequest.objects.create(
+            student=self.student_si,
+            kode_surat=self.type_skmk,
+            status=SuratStatus.APPROVED,
+            ai_original_draft="Draf FEB tidak boleh muncul untuk Kaprodi INF.",
+            payload_data={},
+        )
+        with patch("surat.services.pdf_generator_safe.generate_and_save_official_pdf", return_value="/tmp/custom.pdf"):
+            SuratRequest.objects.create(
+                student=self.student_inf,
+                kode_surat=self.type_custom,
+                ai_original_draft="Draf Custom Pribadi.",
+                final_approved_content="Draf Custom Pribadi.",
+                payload_data={"judul_surat": "CUSTOM"},
+            )
+
+        # Student forbidden
+        self.client.force_authenticate(user=self.user_mhs_inf)
+        self.assertEqual(self.client.get("/api/surat/ai-drafts/").status_code, 403)
+
+        # Kaprodi sees max 5 latest SI-MAG drafts, no FEB SK-MK, and no CUSTOM group
+        self.client.force_authenticate(user=self.user_kaprodi)
+        res = self.client.get("/api/surat/ai-drafts/")
+        self.assertEqual(res.status_code, 200)
+        self.assertGreaterEqual(len(res.data["categories"]), 1)
+
+        groups_by_kode = {g["kode_surat"]: g for g in res.data["groups"]}
+        self.assertIn("SI-MAG", groups_by_kode)
+        self.assertNotIn("CUSTOM-UMUM", groups_by_kode)
+
+        simag_drafts = groups_by_kode["SI-MAG"]["drafts"]
+        self.assertEqual(len(simag_drafts), 5)
+        self.assertEqual([d["id"] for d in simag_drafts], list(reversed(created_inf_ids[-5:])))
+        self.assertEqual(len(groups_by_kode["SK-MK"]["drafts"]), 0)
+
+        # Category filter narrows groups
+        res_cat = self.client.get("/api/surat/ai-drafts/", {"kategori": "Surat Izin"})
+        self.assertEqual(res_cat.status_code, 200)
+        self.assertTrue(all(g["kategori"] == "Surat Izin" for g in res_cat.data["groups"]))
+
+    def test_calibration_feedback_trains_memory_without_altering_historical_pdf_and_toggles(self):
+        from surat.models import AgentFeedbackMemory, TteSignature
+        from surat.agents.letter_agent import SuratDraftingAgent
+        from surat.agents.memory_agent import AgenticMemoryAgent, MemoryDiffEvaluationSchema
+
+        original_text = "Dengan hormat, kami mengajukan izin magang untuk mahasiswa di bawah ini."
+        edited_text = (
+            "Dengan hormat, Ketua Program Studi Informatika mengajukan permohonan resmi "
+            "izin kerja praktik dan magang industri sesuai ketentuan akademik fakultas."
+        )
+
+        req = SuratRequest.objects.create(
+            student=self.student_inf,
+            kode_surat=self.type_simag,
+            status=SuratStatus.APPROVED,
+            nomor_surat_resmi="088/SI-MAG/FT/2026",
+            file_pdf_url="/media/surat/archived_088.pdf",
+            qr_verification_code="qr-cal-088",
+            ai_original_draft=original_text,
+            final_approved_content=original_text,
+            self_critique_score=8,
+            payload_data={"instansi_tujuan": "PT Astra"},
+        )
+        tte = TteSignature.objects.create(
+            surat_request=req,
+            signer=self.lec_kaprodi,
+            token="qr-cal-088",
+            hash_document="hash_immutable_088",
+        )
+
+        self.client.force_authenticate(user=self.user_kaprodi)
+
+        # Identical edit does not create noisy memory rule
+        res_same = self.client.post(
+            f"/api/surat/ai-drafts/{req.id}/feedback/",
+            {"edited_draft": original_text},
+            format="json",
+        )
+        self.assertEqual(res_same.status_code, 200)
+        self.assertFalse(res_same.data["learned"])
+        self.assertEqual(res_same.data["status"], "no_significant_change")
+
+        mock_eval = MemoryDiffEvaluationSchema(
+            is_significant=True,
+            diff_summary="Penambahan redaksi resmi Ketua Program Studi dan istilah magang industri.",
+            extracted_rule="Gunakan frasa permohonan resmi Ketua Program Studi Informatika pada pembuka SI-MAG.",
+            style_guidelines=["Gunakan diksi magang industri sesuai ketentuan akademik fakultas."],
+        )
+        with patch.object(AgenticMemoryAgent, "_invoke_diff_llm", return_value=mock_eval):
+            res_cal = self.client.post(
+                f"/api/surat/ai-drafts/{req.id}/feedback/",
+                {"edited_draft": edited_text},
+                format="json",
+            )
+
+        self.assertEqual(res_cal.status_code, 200)
+        self.assertTrue(res_cal.data["learned"])
+        self.assertEqual(res_cal.data["status"], "learned")
+        mem_id = res_cal.data["memory"]["id"]
+        self.assertEqual(res_cal.data["memory"]["reference_draft"], edited_text)
+
+        # Issued student letter & TTE must remain untouched
+        req.refresh_from_db()
+        tte.refresh_from_db()
+        self.assertEqual(req.final_approved_content, original_text)
+        self.assertEqual(req.status, SuratStatus.APPROVED)
+        self.assertEqual(req.file_pdf_url, "/media/surat/archived_088.pdf")
+        self.assertEqual(req.nomor_surat_resmi, "088/SI-MAG/FT/2026")
+        self.assertEqual(tte.hash_document, "hash_immutable_088")
+
+        # Drafting agent picks up both the learned rule and the calibrated exemplar
+        drafting_agent = SuratDraftingAgent.__new__(SuratDraftingAgent)
+        meta = {
+            "fakultas": self.fak_ft.nama_fakultas,
+            "prodi": self.prodi_inf.nama_prodi,
+        }
+        rules = drafting_agent._load_active_style_rules("SI-MAG", student_metadata=meta)
+        self.assertTrue(any("Ketua Program Studi Informatika" in r for r in rules))
+        exemplar = SuratDraftingAgent._load_lecturer_exemplar("SI-MAG")
+        self.assertIn("kerja praktik dan magang industri", exemplar)
+
+        # List & toggle off rule
+        res_mem_list = self.client.get("/api/surat/ai-feedback-memories/", {"kode_surat": "SI-MAG"})
+        self.assertEqual(res_mem_list.status_code, 200)
+        self.assertTrue(any(m["id"] == mem_id and m["is_active"] for m in res_mem_list.data))
+
+        res_toggle = self.client.patch(
+            f"/api/surat/ai-feedback-memories/{mem_id}/",
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(res_toggle.status_code, 200)
+        self.assertFalse(res_toggle.data["is_active"])
+        self.assertFalse(AgentFeedbackMemory.objects.get(pk=mem_id).is_active)
+
+        rules_after = drafting_agent._load_active_style_rules("SI-MAG", student_metadata=meta)
+        self.assertFalse(any("Ketua Program Studi Informatika" in r for r in rules_after))
+        self.assertEqual(SuratDraftingAgent._load_lecturer_exemplar("SI-MAG"), "")
+
+    @patch("surat.views_extra.send_surat_via_gmail_admin", return_value={"status": "SUCCESS", "message": "Sent"})
+    @patch("surat.views_extra.generate_and_save_official_pdf", return_value="/tmp/lecturer_auto.pdf")
+    @patch("surat.services.pdf_generator_safe.generate_and_save_official_pdf", return_value="/tmp/lecturer_auto.pdf")
+    def test_lecturer_can_create_official_and_custom_letters_end_to_end(self, _mock_pdf, _mock_pdf_extra, _mock_email):
+        # 1. Init chat as lecturer
+        self.client.force_authenticate(user=self.user_kaprodi)
+        res_init = self.client.post(
+            "/api/surat/chat/init/",
+            {"title": "Permohonan Surat Tugas Dosen"},
+            format="json",
+        )
+        self.assertEqual(res_init.status_code, 201)
+        thread_id = res_init.data["thread_id"]
+
+        payload = {
+            "instansi_tujuan": "BRIN Jakarta",
+            "posisi_magang": "Peneliti Tamu",
+            "tanggal_mulai": "2026-07-01",
+            "tanggal_selesai": "2026-07-15",
+        }
+        mock_output = MagicMock()
+        mock_output.to_payload_dict.return_value = payload
+        mock_output.ai_original_draft = "Surat pengantar resmi dosen Kaprodi Informatika ke BRIN Jakarta."
+        mock_output.evaluation.self_critique_score = 9
+        mock_output.evaluation.revision_notes = []
+        mock_output.evaluation.has_missing_info = False
+
+        mock_agent = MagicMock()
+        mock_agent.draft_letter.return_value = mock_output
+        mock_agent.draft_letter_with_reflection.return_value = mock_output
+        mock_agent.get_required_fields_for_kode.return_value = self.type_simag.required_payload_fields
+
+        def _sync_thread(target, kwargs=None, daemon=None):
+            m = MagicMock()
+            m.start.side_effect = lambda: target(**(kwargs or {}))
+            return m
+
+        # 2. Create official letter as lecturer (student=None, requester_lecturer=self.lec_kaprodi)
+        with self.captureOnCommitCallbacks(execute=True), patch(
+            "surat.views.threading.Thread", side_effect=_sync_thread
+        ), patch("surat.views.SuratRequestCreateAPIView.get_drafting_agent", return_value=mock_agent):
+            res_req = self.client.post(
+                "/api/surat/request/",
+                {
+                    "kode_surat": "SI-MAG",
+                    "user_prompt_context": "Mohon surat kunjungan riset ke BRIN Jakarta",
+                    "payload_data": payload,
+                    "thread_id": thread_id,
+                },
+                format="json",
+            )
+
+        self.assertEqual(res_req.status_code, 202)
+        req_id = res_req.data["request_id"]
+        lecturer_req = SuratRequest.objects.get(pk=req_id)
+        self.assertIsNone(lecturer_req.student)
+        self.assertEqual(lecturer_req.requester_lecturer_id, self.lec_kaprodi.id)
+        self.assertEqual(lecturer_req.status, SuratStatus.APPROVED)
+        self.assertTrue(bool(lecturer_req.nomor_surat_resmi))
+        self.assertEqual(SuratApproval.objects.filter(surat_request=lecturer_req).count(), 0)
+
+        # Detail & lifecycle endpoints for author lecturer
+        res_detail = self.client.get(f"/api/surat/requests/{req_id}/")
+        self.assertEqual(res_detail.status_code, 200)
+        self.assertEqual(res_detail.data["requester_role"], "LECTURER")
+        self.assertEqual(res_detail.data["nama_mahasiswa"], self.user_kaprodi.nama)
+
+        import tempfile
+        import os
+        fd, tmp_pdf_path = tempfile.mkstemp(suffix=".pdf")
+        with os.fdopen(fd, "wb") as fp:
+            fp.write(b"%PDF-1.4\n%mock\n")
+        try:
+            with patch("surat.views_extra._ensure_pdf_on_disk", return_value=tmp_pdf_path):
+                res_preview = self.client.get(f"/api/surat/requests/{req_id}/preview-pdf/")
+                self.assertEqual(res_preview.status_code, 200)
+                self.assertEqual(res_preview["Content-Type"], "application/pdf")
+        finally:
+            if os.path.exists(tmp_pdf_path):
+                os.remove(tmp_pdf_path)
+        res_print = self.client.post(f"/api/surat/requests/{req_id}/mark-printed/", {}, format="json")
+        self.assertEqual(res_print.status_code, 200)
+
+        res_email = self.client.post(
+            f"/api/surat/requests/{req_id}/deliver-email/",
+            {"recipient_email": "kaprodi.cal@example.ac.id"},
+            format="json",
+        )
+        self.assertEqual(res_email.status_code, 200)
+
+        from surat.models import TteSignature
+        tte_sig = TteSignature.objects.get(surat_request=lecturer_req)
+        res_verify = self.client.get(f"/api/surat/verify/{tte_sig.token}/")
+        self.assertEqual(res_verify.status_code, 200)
+        self.assertEqual(res_verify.data["status"], "VALID")
+        self.assertEqual(res_verify.data["mahasiswa"]["requester_role"], "LECTURER")
+
+        with self.captureOnCommitCallbacks(execute=True), patch(
+            "surat.views.threading.Thread", side_effect=_sync_thread
+        ), patch("surat.views.SuratRequestRedraftAPIView.get_drafting_agent", return_value=mock_agent):
+            res_redraft = self.client.post(
+                f"/api/surat/requests/{req_id}/re-draft/",
+                {"additional_prompt_context": "Tambahkan periode riset bulan Juli 2026."},
+                format="json",
+            )
+        self.assertEqual(res_redraft.status_code, 202)
+
+        # 3. Private CUSTOM letter created by lecturer remains hidden from other lecturers (Dekan), visible in ?mine=1
+        with patch("surat.views.threading.Thread", side_effect=_sync_thread), patch(
+            "surat.views.SuratRequestCreateAPIView.get_drafting_agent", return_value=mock_agent
+        ):
+            res_custom = self.client.post(
+                "/api/surat/request/",
+                {
+                    "kode_surat": "CUSTOM-UMUM",
+                    "user_prompt_context": "Surat pribadi catatan seminar pribadi dosen",
+                    "payload_data": {"judul_surat": "SURAT PRIBADI DOSEN", "isi_surat": "Keperluan pribadi."},
+                },
+                format="json",
+            )
+        self.assertEqual(res_custom.status_code, 202)
+        custom_id = res_custom.data["request_id"]
+
+        res_mine = self.client.get("/api/surat/requests/", {"mine": 1})
+        self.assertEqual(res_mine.status_code, 200)
+        self.assertIn(custom_id, [row["id"] for row in res_mine.data])
+
+        # Dekan cannot see Kaprodi's private CUSTOM letter in monitoring list, detail (404), or preview-pdf (403)
+        self.client.force_authenticate(user=self.user_dekan)
+        res_dekan_list = self.client.get("/api/surat/requests/")
+        self.assertNotIn(custom_id, [row["id"] for row in res_dekan_list.data])
+        self.assertEqual(self.client.get(f"/api/surat/requests/{custom_id}/").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/surat/requests/{custom_id}/preview-pdf/").status_code, 403)
+

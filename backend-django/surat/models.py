@@ -92,7 +92,14 @@ class SuratRequest(models.Model):
     Status = SuratStatus
     StatusChoices = SuratStatus
 
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='requests')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='requests', null=True, blank=True)
+    requester_lecturer = models.ForeignKey(
+        Lecturer,
+        on_delete=models.CASCADE,
+        related_name='requested_surats',
+        null=True,
+        blank=True,
+    )
     kode_surat = models.ForeignKey(SuratType, on_delete=models.CASCADE)
     nomor_surat_resmi = models.CharField(max_length=100, null=True, blank=True)
     status = models.CharField(
@@ -135,6 +142,36 @@ class SuratRequest(models.Model):
         related_name='surat_requests',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def requester_profile(self):
+        return self.student if self.student_id else self.requester_lecturer
+
+    @property
+    def requester_user(self):
+        prof = self.requester_profile
+        return getattr(prof, 'user', None) if prof is not None else None
+
+    @property
+    def requester_identifier(self) -> str:
+        if self.student_id and self.student is not None:
+            return str(self.student.nim or '')
+        user_obj = self.requester_user
+        return str(getattr(user_obj, 'nip_nim', '') or '')
+
+    @property
+    def requester_role(self) -> str:
+        if self.requester_lecturer_id and not self.student_id:
+            return 'LECTURER'
+        return 'STUDENT'
+
+    @property
+    def requester_prodi(self):
+        return getattr(self.requester_profile, 'prodi', None)
+
+    @property
+    def requester_fakultas(self):
+        return getattr(self.requester_profile, 'fakultas', None)
 
     class Meta:
         db_table = 'surat_request'
@@ -204,6 +241,7 @@ class AgentFeedbackMemory(models.Model):
     )
     diff_summary = models.TextField()
     extracted_rule = models.TextField()
+    reference_draft = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -285,6 +323,7 @@ def _smart_chat_message_save(self, *args, **kwargs):
                             break
                     u_obj = getattr(thread_obj, "user", None)
                     stu_obj = getattr(thread_obj, "student", None) or getattr(u_obj, "student_profile", None)
+                    lec_obj = getattr(u_obj, "lecturer_profile", None)
                 stu_info = {}
                 if stu_obj is not None:
                     stu_info = {
@@ -292,6 +331,13 @@ def _smart_chat_message_save(self, *args, **kwargs):
                         "nim": getattr(stu_obj, "nim", "-"),
                         "prodi": getattr(getattr(stu_obj, "prodi", None), "nama_prodi", "-"),
                         "semester": getattr(stu_obj, "semester_aktif", "-"),
+                    }
+                elif lec_obj is not None:
+                    stu_info = {
+                        "nama": getattr(getattr(lec_obj, "user", None), "nama", "-"),
+                        "nim": getattr(getattr(lec_obj, "user", None), "nip_nim", "-"),
+                        "prodi": getattr(getattr(lec_obj, "prodi", None), "nama_prodi", "-"),
+                        "semester": ", ".join(lec_obj.jabatan_struktural or []) or "Dosen",
                     }
                 upgraded = generate_conversational_reply(
                     user_message=last_user_msg or "Halo",
@@ -329,7 +375,8 @@ def _guarded_surat_request_save(self, *args, **kwargs):
                     or "mahasiswa bersangkutan" in cur_body.lower()
                     or "kelengkapan administratif" in cur_body.lower()
                 )
-                if is_slop_or_empty and getattr(self, "student_id", None):
+                requester = self.requester_profile
+                if is_slop_or_empty and requester is not None:
                     from .services.custom_letter_ai import generate_custom_letter_body
                     hist = []
                     th = getattr(self, "chat_thread", None)
@@ -338,7 +385,7 @@ def _guarded_surat_request_save(self, *args, **kwargs):
                     if th is not None:
                         hist = [{"sender": r.sender, "text": r.message} for r in th.messages.order_by("created_at")]
                     body_txt = generate_custom_letter_body(
-                        student=self.student,
+                        student=requester,
                         payload_data=pdata,
                         user_prompt_context=str(getattr(self, "user_prompt_context", "") or ""),
                         history_messages=hist,
@@ -361,19 +408,21 @@ def _guarded_surat_request_save(self, *args, **kwargs):
         if kode.startswith("CUSTOM") and self.id and not is_status_or_delivery_only:
             SuratApproval.objects.filter(surat_request_id=self.id).delete()
             from .services.pdf_generator_safe import generate_and_save_official_pdf
-            st = self.student
+            requester = self.requester_profile
+            requester_user = self.requester_user
             pdata = self.payload_data or {}
             generate_and_save_official_pdf({
                 "id": self.id,
                 "surat_request_id": self.id,
                 "kode_surat": kode,
                 "is_custom_personal": True,
+                "requester_role": self.requester_role,
                 "nomor_surat": self.nomor_surat_resmi or f"CUSTOM/{self.id:03d}/2026",
                 "nama_surat": pdata.get("judul_surat") or self.kode_surat.nama_surat,
-                "nama_mahasiswa": st.user.nama,
-                "nim": st.nim,
-                "program_studi": getattr(getattr(st, "prodi", None), "nama_prodi", None) or "Informatika",
-                "fakultas": getattr(getattr(st, "fakultas", None), "nama_fakultas", None) or "Teknik",
+                "nama_mahasiswa": getattr(requester_user, "nama", "-"),
+                "nim": self.requester_identifier or "-",
+                "program_studi": getattr(self.requester_prodi, "nama_prodi", None) or "Informatika",
+                "fakultas": getattr(self.requester_fakultas, "nama_fakultas", None) or "Teknik",
                 "final_approved_content": self.final_approved_content or self.ai_original_draft or "",
                 "isi_surat": self.final_approved_content or self.ai_original_draft or "",
                 "payload": pdata,

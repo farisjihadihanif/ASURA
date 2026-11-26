@@ -1,4 +1,4 @@
-﻿const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id);
 const SUBMIT_TRIGGER_PHRASES = new Set([
   'terbitkan',
   'terbitkan surat',

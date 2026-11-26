@@ -1,10 +1,14 @@
-﻿from django.urls import path
+from django.urls import path
 from .views import (
     SuratTypeListAPIView,
     SuratRequestCreateAPIView,
     SuratRequestListAPIView,
     SuratRequestDetailAPIView,
     LecturerApprovalActionAPIView,
+    LecturerAiDraftListAPIView,
+    LecturerAiDraftFeedbackAPIView,
+    LecturerAiFeedbackMemoryListAPIView,
+    LecturerAiFeedbackMemoryToggleAPIView,
     SuratVerifyAPIView,
     SuratRequestRedraftAPIView,
     ChatThreadCreateAPIView,
@@ -33,6 +37,10 @@ urlpatterns = [
     path('requests/<int:pk>/deliver-email/', SuratDeliverEmailAPIView.as_view(), name='surat-deliver-email'),
     path('requests/<int:pk>/upload-signature/', SuratUploadSignatureAPIView.as_view(), name='surat-upload-signature'),
     path('approval/<int:approval_id>/action/', LecturerApprovalActionAPIView.as_view(), name='surat-approval-action'),
+    path('ai-drafts/', LecturerAiDraftListAPIView.as_view(), name='lecturer-ai-draft-list'),
+    path('ai-drafts/<int:pk>/feedback/', LecturerAiDraftFeedbackAPIView.as_view(), name='lecturer-ai-draft-feedback'),
+    path('ai-feedback-memories/', LecturerAiFeedbackMemoryListAPIView.as_view(), name='lecturer-ai-memory-list'),
+    path('ai-feedback-memories/<int:pk>/', LecturerAiFeedbackMemoryToggleAPIView.as_view(), name='lecturer-ai-memory-toggle'),
     path('verify/<str:token>/', SuratVerifyAPIView.as_view(), name='surat-verify'),
     path('requests/<int:pk>/re-draft/', SuratRequestRedraftAPIView.as_view(), name='surat-request-redraft'),
     path('chat/init/', ChatThreadCreateAPIView.as_view(), name='chat-init'),

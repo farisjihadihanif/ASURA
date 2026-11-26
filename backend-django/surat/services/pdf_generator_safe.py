@@ -156,7 +156,9 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
                 f"di Tempat"
                 f"</div>"
             )
-        nim_footer_html = f"<br/><span style='font-size: 10.5pt; color: #333333;'>NIM. {nim_mhs}</span>" if is_sakit else ""
+        requester_role = str(context_data.get("requester_role") or "STUDENT").upper()
+        id_footer_label = "NIP." if requester_role == "LECTURER" else "NIM."
+        nim_footer_html = f"<br/><span style='font-size: 10.5pt; color: #333333;'>{id_footer_label} {nim_mhs}</span>" if is_sakit else ""
         html_doc = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
@@ -222,11 +224,20 @@ def generate_and_save_official_pdf(context_data: Dict[str, Any]) -> str:
   </table>
   <p>Menerangkan dengan sesungguhnya bahwa:</p>
   <table style="width: 100%; margin-bottom: 12px;">
-    <tr><td style="width: 150px;">Nama Mahasiswa</td><td>: <b>{nama_mhs}</b></td></tr>
-    <tr><td>NIM</td><td>: {nim_mhs}</td></tr>
-    <tr><td>Program Studi</td><td>: {prodi_mhs}</td></tr>
-    <tr><td>Fakultas</td><td>: {fakultas_clean}</td></tr>
-    <tr><td>Semester / T.A.</td><td>: {semester_mhs} / {tahun_akademik}</td></tr>
+    {(
+        f"<tr><td style='width: 150px;'>Nama</td><td>: <b>{nama_mhs}</b></td></tr>"
+        f"<tr><td>NIP</td><td>: {nim_mhs}</td></tr>"
+        f"<tr><td>Program Studi</td><td>: {prodi_mhs}</td></tr>"
+        f"<tr><td>Fakultas</td><td>: {fakultas_clean}</td></tr>"
+        + (f"<tr><td>Jabatan</td><td>: {context_data.get('jabatan_pemohon')}</td></tr>" if context_data.get('jabatan_pemohon') else "")
+        if str(context_data.get("requester_role") or "STUDENT").upper() == "LECTURER"
+        else
+        f"<tr><td style='width: 150px;'>Nama Mahasiswa</td><td>: <b>{nama_mhs}</b></td></tr>"
+        f"<tr><td>NIM</td><td>: {nim_mhs}</td></tr>"
+        f"<tr><td>Program Studi</td><td>: {prodi_mhs}</td></tr>"
+        f"<tr><td>Fakultas</td><td>: {fakultas_clean}</td></tr>"
+        f"<tr><td>Semester / T.A.</td><td>: {semester_mhs} / {tahun_akademik}</td></tr>"
+    )}
   </table>
   <div>{paragraphs_html}</div>
   <p>Demikian surat ini dibuat untuk dipergunakan sebagaimana mestinya.</p>

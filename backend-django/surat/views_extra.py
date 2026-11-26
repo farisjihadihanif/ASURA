@@ -30,6 +30,9 @@ def _user_owns_surat(user, surat_req: SuratRequest) -> bool:
         return False
     if getattr(user, "is_superuser", False):
         return True
+    requester_user = getattr(surat_req, "requester_user", None)
+    if requester_user is not None and requester_user.pk == user.pk:
+        return True
     student_user_id = getattr(getattr(surat_req, "student", None), "user_id", None)
     return student_user_id is not None and student_user_id == user.pk
 
@@ -51,16 +54,16 @@ def _user_can_view_surat(user, surat_req: SuratRequest) -> bool:
 
 
 def _resolve_signer(surat_req: SuratRequest):
-    """(nama, nip, jabatan) penandatangan: override payload -> dosen yang meng-ACC -> pejabat resmi mahasiswa."""
+    """(nama, nip, jabatan) penandatangan: override payload -> dosen yang meng-ACC -> pejabat resmi."""
     payload = surat_req.payload_data or {}
     lec = None
     approved = surat_req.approvals.filter(status="APPROVED").select_related("approver__user").order_by("-step_order").first()
     if approved:
         lec = approved.approver
     if lec is None:
-        st = surat_req.student
+        requester = surat_req.requester_profile
         kode = getattr(getattr(surat_req, "kode_surat", None), "kode_surat", None)
-        lec = resolve_official_approver(st, kode)
+        lec = resolve_official_approver(requester, kode)
     user = getattr(lec, "user", None)
     jab = (getattr(lec, "jabatan_struktural", None) or [""])[0] if lec else ""
     return (
@@ -71,18 +74,24 @@ def _resolve_signer(surat_req: SuratRequest):
 
 
 def _build_official_a4_html(surat_req: SuratRequest) -> str:
-    student = surat_req.student
-    prodi_nama = getattr(getattr(student, "prodi", None), "nama_prodi", None) or "Teknik Informatika"
-    fakultas_nama = clean_fakultas_name(getattr(getattr(student, "fakultas", None), "nama_fakultas", None) or "Sains dan Teknologi")
-    semester_mhs = getattr(student, "semester_aktif", "-")
-    tahun_akademik = getattr(student, "tahun_akademik", "-")
+    requester = surat_req.requester_profile
+    requester_user = surat_req.requester_user
+    requester_nama = getattr(requester_user, "nama", None) or "-"
+    requester_id = surat_req.requester_identifier or "-"
+    is_lecturer = surat_req.requester_role == "LECTURER"
+    prodi_nama = getattr(surat_req.requester_prodi, "nama_prodi", None) or "Teknik Informatika"
+    fakultas_nama = clean_fakultas_name(getattr(surat_req.requester_fakultas, "nama_fakultas", None) or "Sains dan Teknologi")
+    semester_mhs = getattr(requester, "semester_aktif", "-")
+    tahun_akademik = getattr(requester, "tahun_akademik", "-")
+    jabatan_pemohon = ", ".join(getattr(requester, "jabatan_struktural", None) or []) if is_lecturer else ""
     nomor_resmi = surat_req.nomor_surat_resmi or f"{surat_req.id:03d}/{surat_req.kode_surat.kode_surat}/FT/2026"
     payload = surat_req.payload_data or {}
     nama_surat = str(payload.get("judul_surat") or surat_req.kode_surat.nama_surat or "SURAT KETERANGAN RESMI")
+    id_word = "NIP" if is_lecturer else "NIM"
     raw_isi = (
         (surat_req.final_approved_content or "").strip()
         or (surat_req.ai_original_draft or "").strip()
-        or f"Dengan ini menerangkan bahwa {student.user.nama} (NIM {student.nim}) mengajukan {nama_surat}."
+        or f"Dengan ini menerangkan bahwa {requester_nama} ({id_word} {requester_id}) mengajukan {nama_surat}."
     )
     isi_html = clean_letter_body_text(raw_isi)
     paragraphs_html = "".join(
@@ -96,6 +105,20 @@ def _build_official_a4_html(surat_req: SuratRequest) -> str:
     qr_img_html = _build_qr_img_html(qr_url)
     qr_token = str(qr_url).rstrip("/").split("/")[-1][:8].upper()
     signer_nama, signer_nip, signer_jabatan = _resolve_signer(surat_req)
+    pemohon_rows_html = (
+        f"<tr><td style='width: 155px; padding: 2px 0;'>Nama</td><td style='width: 14px;'>:</td><td><b>{requester_nama}</b></td></tr>"
+        f"<tr><td style='padding: 2px 0;'>NIP</td><td>:</td><td>{requester_id}</td></tr>"
+        f"<tr><td style='padding: 2px 0;'>Program Studi</td><td>:</td><td>{prodi_nama}</td></tr>"
+        f"<tr><td style='padding: 2px 0;'>Fakultas</td><td>:</td><td>{fakultas_nama}</td></tr>"
+        + (f"<tr><td style='padding: 2px 0;'>Jabatan</td><td>:</td><td>{jabatan_pemohon}</td></tr>" if jabatan_pemohon else "")
+        if is_lecturer
+        else
+        f"<tr><td style='width: 155px; padding: 2px 0;'>Nama Mahasiswa</td><td style='width: 14px;'>:</td><td><b>{requester_nama}</b></td></tr>"
+        f"<tr><td style='padding: 2px 0;'>NIM</td><td>:</td><td>{requester_id}</td></tr>"
+        f"<tr><td style='padding: 2px 0;'>Program Studi</td><td>:</td><td>{prodi_nama}</td></tr>"
+        f"<tr><td style='padding: 2px 0;'>Fakultas</td><td>:</td><td>{fakultas_nama}</td></tr>"
+        f"<tr><td style='padding: 2px 0;'>Semester / T.A.</td><td>:</td><td>{semester_mhs} / {tahun_akademik}</td></tr>"
+    )
     return f"""<!DOCTYPE html>
 <html lang="id">
 <head>
@@ -138,11 +161,7 @@ def _build_official_a4_html(surat_req: SuratRequest) -> str:
   </table>
   <p style="margin: 0 0 6px 0;">Dengan ini menerangkan bahwa:</p>
   <table style="margin-bottom: 14px;">
-    <tr><td style="width: 155px; padding: 2px 0;">Nama Mahasiswa</td><td style="width: 14px;">:</td><td><b>{student.user.nama}</b></td></tr>
-    <tr><td style="padding: 2px 0;">NIM</td><td>:</td><td>{student.nim}</td></tr>
-    <tr><td style="padding: 2px 0;">Program Studi</td><td>:</td><td>{prodi_nama}</td></tr>
-    <tr><td style="padding: 2px 0;">Fakultas</td><td>:</td><td>{fakultas_nama}</td></tr>
-    <tr><td style="padding: 2px 0;">Semester / T.A.</td><td>:</td><td>{semester_mhs} / {tahun_akademik}</td></tr>
+    {pemohon_rows_html}
   </table>
   <div style="margin-top: 8px;">{paragraphs_html}</div>
   <p style="margin: 12px 0 22px 0; text-indent: 28px; text-align: justify;">
@@ -174,14 +193,19 @@ def _ensure_pdf_on_disk(surat_req: SuratRequest) -> str:
     os.makedirs(pdf_dir, exist_ok=True)
     target_pdf = os.path.join(pdf_dir, f"surat_{surat_req.id}.pdf")
     if not (os.path.exists(target_pdf) and os.path.getsize(target_pdf) > 0):
-        student = surat_req.student
-        prodi_nama = getattr(getattr(student, "prodi", None), "nama_prodi", None) or "Teknik Informatika"
-        fakultas_nama = clean_fakultas_name(getattr(getattr(student, "fakultas", None), "nama_fakultas", None) or "Sains dan Teknologi")
+        requester = surat_req.requester_profile
+        requester_user = surat_req.requester_user
+        requester_nama = getattr(requester_user, "nama", None) or "-"
+        requester_id = surat_req.requester_identifier or "-"
+        is_lecturer = surat_req.requester_role == "LECTURER"
+        prodi_nama = getattr(surat_req.requester_prodi, "nama_prodi", None) or "Teknik Informatika"
+        fakultas_nama = clean_fakultas_name(getattr(surat_req.requester_fakultas, "nama_fakultas", None) or "Sains dan Teknologi")
         nomor_resmi = surat_req.nomor_surat_resmi or f"{surat_req.id:03d}/{surat_req.kode_surat.kode_surat}/FT/2026"
+        id_word = "NIP" if is_lecturer else "NIM"
         effective_content = (
             (surat_req.final_approved_content or "").strip()
             or (surat_req.ai_original_draft or "").strip()
-            or f"Dengan ini menerangkan bahwa {student.user.nama} (NIM {student.nim}) mengajukan {surat_req.kode_surat.nama_surat}."
+            or f"Dengan ini menerangkan bahwa {requester_nama} ({id_word} {requester_id}) mengajukan {surat_req.kode_surat.nama_surat}."
         )
         generate_and_save_official_pdf(
             {
@@ -189,14 +213,16 @@ def _ensure_pdf_on_disk(surat_req: SuratRequest) -> str:
                 "surat_request_id": surat_req.id,
                 "kode_surat": surat_req.kode_surat.kode_surat,
                 "is_custom_personal": str(surat_req.kode_surat.kode_surat or "").upper().startswith("CUSTOM"),
+                "requester_role": surat_req.requester_role,
+                "jabatan_pemohon": ", ".join(getattr(requester, "jabatan_struktural", None) or []) if is_lecturer else "",
                 "nomor_surat": nomor_resmi,
                 "nama_surat": surat_req.kode_surat.nama_surat,
-                "nama_mahasiswa": student.user.nama,
-                "nim": student.nim,
+                "nama_mahasiswa": requester_nama,
+                "nim": requester_id,
                 "program_studi": prodi_nama,
                 "fakultas": fakultas_nama,
-                "semester_aktif": getattr(student, "semester_aktif", "-"),
-                "tahun_akademik": getattr(student, "tahun_akademik", "-"),
+                "semester_aktif": getattr(requester, "semester_aktif", "-"),
+                "tahun_akademik": getattr(requester, "tahun_akademik", "-"),
                 "final_approved_content": effective_content,
                 "isi_surat": effective_content,
                 "payload": surat_req.payload_data or {},
@@ -229,7 +255,15 @@ def _append_chat_feedback(surat_req: SuratRequest, text: str) -> None:
 def _build_pdf_preview_response(request, pk: int, attachment: bool = False):
     surat_req = (
         SuratRequest.objects.select_related(
-            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat"
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
+            "kode_surat",
         )
         .filter(pk=pk)
         .first()
@@ -284,7 +318,15 @@ class SuratMarkPrintedAPIView(APIView):
 
     def post(self, request, pk: int):
         surat_req = SuratRequest.objects.select_related(
-            "kode_surat", "student", "student__user", "student__prodi", "student__fakultas"
+            "kode_surat",
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
         ).filter(pk=pk).first()
         if not surat_req:
             return Response({"error": "Surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
@@ -325,7 +367,15 @@ class SuratDeliverEmailAPIView(APIView):
 
     def post(self, request, pk: int):
         surat_req = SuratRequest.objects.select_related(
-            "kode_surat", "student", "student__user", "student__prodi", "student__fakultas"
+            "kode_surat",
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
         ).filter(pk=pk).first()
         if not surat_req:
             return Response({"error": "Surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
@@ -347,11 +397,14 @@ class SuratDeliverEmailAPIView(APIView):
         if not recipient_email:
             return Response({"error": "Alamat email tujuan wajib diisi."}, status=status.HTTP_400_BAD_REQUEST)
         target_pdf = _ensure_pdf_on_disk(surat_req)
+        id_word = "NIP" if surat_req.requester_role == "LECTURER" else "NIM"
+        requester_nama = getattr(surat_req.requester_user, "nama", None) or "-"
+        requester_id = surat_req.requester_identifier or "-"
         subject = f"Dokumen Resmi: {surat_req.kode_surat.nama_surat} ({surat_req.nomor_surat_resmi or surat_req.id})"
         body = (
             f"Yth. Penerima,\n\n"
             f"Berikut kami lampirkan dokumen resmi {surat_req.kode_surat.nama_surat} "
-            f"atas nama {surat_req.student.user.nama} (NIM: {surat_req.student.nim}).\n\n"
+            f"atas nama {requester_nama} ({id_word}: {requester_id}).\n\n"
             f"Terima kasih,\nASURA Persuratan Kampus"
         )
         res = send_surat_via_gmail_admin(
@@ -390,7 +443,15 @@ class SuratUploadSignatureAPIView(APIView):
         from .services.signature_storage import save_request_signature_file
         from .services.pdf_generator_safe import generate_and_save_official_pdf
         surat_req = SuratRequest.objects.select_related(
-            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat"
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
+            "kode_surat",
         ).filter(pk=pk).first()
         if not surat_req:
             return Response({"error": "Surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
@@ -415,7 +476,8 @@ class SuratUploadSignatureAPIView(APIView):
         pdata["_manual_signature_path"] = saved_path
         surat_req.payload_data = pdata
         surat_req.save(update_fields=["payload_data"])
-        st = surat_req.student
+        st = surat_req.requester_profile
+        req_user = surat_req.requester_user
         is_custom = _is_custom_surat(surat_req)
         signer_nama, signer_nip, signer_jabatan = _resolve_signer(surat_req)
         generate_and_save_official_pdf({
@@ -423,16 +485,18 @@ class SuratUploadSignatureAPIView(APIView):
             "surat_request_id": surat_req.id,
             "kode_surat": surat_req.kode_surat.kode_surat,
             "is_custom_personal": is_custom,
+            "requester_role": surat_req.requester_role,
+            "jabatan_pemohon": ", ".join(getattr(st, "jabatan_struktural", None) or []) if surat_req.requester_role == "LECTURER" else "",
             "nomor_surat": surat_req.nomor_surat_resmi or (
                 f"CUSTOM/{surat_req.id:03d}/2026"
                 if is_custom
                 else f"{surat_req.id:03d}/{surat_req.kode_surat.kode_surat}/FT/2026"
             ),
             "nama_surat": pdata.get("judul_surat") or surat_req.kode_surat.nama_surat,
-            "nama_mahasiswa": st.user.nama,
-            "nim": st.nim,
-            "program_studi": getattr(getattr(st, "prodi", None), "nama_prodi", None) or "Informatika",
-            "fakultas": getattr(getattr(st, "fakultas", None), "nama_fakultas", None) or "Teknik",
+            "nama_mahasiswa": getattr(req_user, "nama", "-"),
+            "nim": surat_req.requester_identifier or "-",
+            "program_studi": getattr(surat_req.requester_prodi, "nama_prodi", None) or "Informatika",
+            "fakultas": getattr(surat_req.requester_fakultas, "nama_fakultas", None) or "Teknik",
             "semester_aktif": getattr(st, "semester_aktif", "-"),
             "tahun_akademik": getattr(st, "tahun_akademik", "-"),
             "final_approved_content": surat_req.final_approved_content or surat_req.ai_original_draft or "",

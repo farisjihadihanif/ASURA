@@ -68,8 +68,9 @@ def generate_custom_letter_body(
     payload = payload_data or {}
     kode = str(kode_surat or payload.get("kode_surat") or "CUSTOM-UMUM").upper()
     is_sakit = kode == "CUSTOM-SAKIT" or "sakit" in str(payload.get("judul_surat") or user_prompt_context).lower()
-    nama_mhs = getattr(getattr(student, "user", None), "nama", "Mahasiswa")
-    nim_mhs = getattr(student, "nim", "-")
+    nama_mhs = getattr(getattr(student, "user", None), "nama", "Pemohon")
+    nim_mhs = getattr(student, "nim", None) or getattr(getattr(student, "user", None), "nip_nim", "-")
+    id_label = "NIM" if getattr(student, "nim", None) else "NIP"
     prodi_mhs = getattr(getattr(student, "prodi", None), "nama_prodi", "Informatika")
     judul = str(
         payload.get("judul_surat")
@@ -185,9 +186,9 @@ def generate_custom_letter_body(
             f"Dengan hormat,\n\n"
             f"Saya yang bertanda tangan di bawah ini:\n"
             f"Nama : {nama_mhs}\n"
-            f"NIM : {nim_mhs}\n"
+            f"{id_label} : {nim_mhs}\n"
             f"Program Studi : {prodi_mhs}\n\n"
-            f"Dengan ini memohon izin untuk tidak dapat mengikuti perkuliahan{mk_line} pada {tanggal_izin} "
+            f"Dengan ini memohon izin untuk tidak dapat mengikuti kegiatan{mk_line} pada {tanggal_izin} "
             f"dikarenakan kondisi kesehatan yang sedang kurang baik (sakit) dan memerlukan waktu istirahat untuk pemulihan.\n\n"
             f"Demikian surat izin ini saya sampaikan dengan sebenar-benarnya. Atas perhatian dan pengertian Bapak/Ibu, saya ucapkan terima kasih."
         )

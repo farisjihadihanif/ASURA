@@ -25,6 +25,7 @@ from .agents.letter_agent import (
     SuratDraftingAgent,
 )
 from .models import (
+    AgentFeedbackMemory,
     ApprovalStatus,
     SuratApproval,
     SuratAuditLog,
@@ -37,6 +38,7 @@ from .models import (
     Notification,
 )
 from .serializers import (
+    AgentFeedbackMemorySerializer,
     SuratApprovalActionSerializer,
     SuratRequestCreateSerializer,
     SuratRequestDetailSerializer,
@@ -102,7 +104,7 @@ def _handle_incomplete_draft_in_worker(
             str(n).strip() for n in (surat_req.revision_notes or []) if str(n).strip()
         ) or "Mohon lengkapi detail permohonan surat."
         notify_user(
-            surat_req.student.user,
+            surat_req.requester_user,
             "REVISION_REQUIRED",
             f"Perlu Perbaikan Data: {surat_req.kode_surat.nama_surat}",
             notes_text,
@@ -170,10 +172,12 @@ def _finalize_ready_draft_in_worker(
         )
         if is_redraft:
             SuratApproval.objects.filter(surat_request=surat_req).delete()
-        create_approval_workflow_for_request(surat_req, surat_req.student)
+        create_approval_workflow_for_request(surat_req, surat_req.requester_profile)
         if is_redraft:
             from .agents import ensure_approval_queue_for_request
             ensure_approval_queue_for_request(surat_req)
+        req_nama = getattr(surat_req.requester_user, "nama", "")
+        req_id = surat_req.requester_identifier
         for app_step in SuratApproval.objects.filter(
             surat_request=surat_req, status=ApprovalStatus.PENDING
         ).select_related("approver__user"):
@@ -182,9 +186,9 @@ def _finalize_ready_draft_in_worker(
                 "APPROVAL_REQUIRED",
                 f"{'Revisi Diajukan Ulang' if is_redraft else 'Permohonan Baru'}: {surat_req.kode_surat.nama_surat}",
                 (
-                    f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan ulang surat setelah revisi."
+                    f"Pemohon {req_nama} ({req_id}) mengajukan ulang surat setelah revisi."
                     if is_redraft
-                    else f"Mahasiswa {surat_req.student.user.nama} ({surat_req.student.nim}) mengajukan {surat_req.kode_surat.nama_surat}."
+                    else f"Pemohon {req_nama} ({req_id}) mengajukan {surat_req.kode_surat.nama_surat}."
                 ),
                 surat_req,
             )
@@ -207,7 +211,7 @@ def _finalize_ready_draft_in_worker(
             "revision_notes",
         ]
     )
-    signer_obj = resolve_official_approver(surat_req.student, surat_req.kode_surat.kode_surat)
+    signer_obj = resolve_official_approver(surat_req.requester_profile, surat_req.kode_surat.kode_surat)
     _execute_final_issuance_worker(
         surat_request_id=surat_req.id,
         signer_lecturer_id=getattr(signer_obj, "pk", None),
@@ -260,7 +264,16 @@ def _execute_drafting_agent_worker(
             readiness["structured_payload"] = dict(initial_payload)
 
         surat_req = SuratRequest.objects.select_related(
-            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat", "chat_thread"
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
+            "kode_surat",
+            "chat_thread",
         ).get(pk=surat_request_id)
 
         has_missing_info = getattr(getattr(draft_output, "evaluation", None), "has_missing_info", False)
@@ -296,7 +309,16 @@ def _execute_redraft_agent_worker(
     close_old_connections()
     try:
         surat_req = SuratRequest.objects.select_related(
-            "student", "student__user", "student__prodi", "student__fakultas", "kode_surat", "chat_thread"
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
+            "kode_surat",
+            "chat_thread",
         ).get(pk=surat_request_id)
         active_agent = agent if agent is not None else SuratDraftingAgent()
         draft_output = active_agent.draft_letter_with_reflection(
@@ -397,7 +419,10 @@ class NotificationListAPIView(APIView):
     def get(self, request):
         queryset = Notification.objects.filter(user=request.user)
         if hasattr(request.user, 'lecturer_profile'):
-            queryset = queryset.exclude(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
+            queryset = queryset.filter(
+                Q(surat_request__requester_lecturer=request.user.lecturer_profile)
+                | ~Q(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
+            )
         if request.query_params.get('unread') == '1':
             queryset = queryset.filter(is_read=False)
         return Response(
@@ -423,7 +448,10 @@ class NotificationUnreadCountAPIView(APIView):
     def get(self, request):
         qs = Notification.objects.filter(user=request.user, is_read=False)
         if hasattr(request.user, 'lecturer_profile'):
-            qs = qs.exclude(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
+            qs = qs.filter(
+                Q(surat_request__requester_lecturer=request.user.lecturer_profile)
+                | ~Q(surat_request__kode_surat__kode_surat__startswith='CUSTOM')
+            )
         return Response({'count': qs.count()})
 
 
@@ -711,6 +739,40 @@ class ChatSessionMessageAPIView(APIView):
             )
         thread.delete()
         return Response({"status": "success", "message": "Riwayat chat berhasil dihapus."}, status=status.HTTP_200_OK)
+def _resolve_requester_profile_and_metadata(user):
+    if hasattr(user, "student_profile"):
+        student_obj = user.student_profile
+        return (
+            "STUDENT",
+            student_obj,
+            {
+                "nim": student_obj.nim,
+                "nama": getattr(student_obj.user, "nama", ""),
+                "prodi": getattr(student_obj.prodi, "nama_prodi", ""),
+                "fakultas": getattr(student_obj.fakultas, "nama_fakultas", ""),
+                "semester_aktif": student_obj.semester_aktif,
+                "tahun_akademik": student_obj.tahun_akademik,
+                "peran": "STUDENT",
+            },
+        )
+    if hasattr(user, "lecturer_profile"):
+        lecturer_obj = user.lecturer_profile
+        jabs = ", ".join(getattr(lecturer_obj, "jabatan_struktural", None) or [])
+        return (
+            "LECTURER",
+            lecturer_obj,
+            {
+                "nip": getattr(lecturer_obj.user, "nip_nim", ""),
+                "nama": getattr(lecturer_obj.user, "nama", ""),
+                "prodi": getattr(lecturer_obj.prodi, "nama_prodi", ""),
+                "fakultas": getattr(lecturer_obj.fakultas, "nama_fakultas", ""),
+                "jabatan": jabs,
+                "peran": "LECTURER",
+            },
+        )
+    return (None, None, {})
+
+
 class SuratRequestRedraftAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     authentication_classes = [CustomJWTAuthentication]
@@ -721,17 +783,26 @@ class SuratRequestRedraftAPIView(APIView):
         return self.agent_instance
 
     def post(self, request, pk=None):
-        try:
-            student_obj = request.user.student_profile
-        except (Student.DoesNotExist, AttributeError):
-            return Response({"status": "error", "errors": "Bukan akun mahasiswa."}, status=status.HTTP_400_BAD_REQUEST)
+        req_role, req_profile, student_metadata = _resolve_requester_profile_and_metadata(request.user)
+        if not req_role or req_profile is None:
+            return Response(
+                {"status": "error", "errors": "Hanya mahasiswa atau dosen/penanggung jawab yang dapat merevisi pengajuan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            surat_req = SuratRequest.objects.select_related("kode_surat", "student").get(pk=pk)
+            surat_req = SuratRequest.objects.select_related(
+                "kode_surat",
+                "student",
+                "student__user",
+                "requester_lecturer",
+                "requester_lecturer__user",
+            ).get(pk=pk)
         except SuratRequest.DoesNotExist:
             return Response({"status": "error", "errors": "Permohonan surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
 
-        if surat_req.student != student_obj:
+        owner_user = surat_req.requester_user
+        if owner_user is None or owner_user.pk != request.user.pk:
             return Response({"status": "error", "errors": "Akses ditolak."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = ReDraftSuratRequestSerializer(data=request.data)
@@ -746,15 +817,6 @@ class SuratRequestRedraftAPIView(APIView):
         raw_new_payload = serializer.validated_data.get("payload_data")
         if isinstance(raw_new_payload, dict) and raw_new_payload:
             previous_payload.update(raw_new_payload)
-
-        student_metadata = {
-            "nim": student_obj.nim,
-            "nama": getattr(student_obj.user, "nama", ""),
-            "prodi": getattr(student_obj.prodi, "nama_prodi", ""),
-            "fakultas": getattr(student_obj.fakultas, "nama_fakultas", ""),
-            "semester_aktif": student_obj.semester_aktif,
-            "tahun_akademik": student_obj.tahun_akademik,
-        }
 
         surat_req.user_prompt_context = combined_prompt
         surat_req.payload_data = previous_payload
@@ -817,11 +879,14 @@ class SuratRequestCreateAPIView(APIView):
         return self.agent_instance
 
     def post(self, request):
-        try:
-            student_obj = request.user.student_profile
-        except (Student.DoesNotExist, AttributeError):
+        req_role, req_profile, student_metadata = _resolve_requester_profile_and_metadata(request.user)
+        if not req_role or req_profile is None:
             return Response(
-                {"status": "error", "message": "Validasi gagal", "errors": "Hanya mahasiswa yang dapat mengajukan surat."},
+                {
+                    "status": "error",
+                    "message": "Validasi gagal",
+                    "errors": "Hanya mahasiswa atau dosen/penanggung jawab yang dapat mengajukan surat.",
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -846,12 +911,13 @@ class SuratRequestCreateAPIView(APIView):
         except SuratType.DoesNotExist:
             return Response({"status": "error", "errors": "Jenis surat tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
 
-        not_eligible = check_eligibility(student_obj, surat_type.kode_surat)
-        if not_eligible:
-            return Response(
-                {"status": "error", "message": not_eligible, "errors": not_eligible},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if req_role == "STUDENT":
+            not_eligible = check_eligibility(req_profile, surat_type.kode_surat)
+            if not_eligible:
+                return Response(
+                    {"status": "error", "message": not_eligible, "errors": not_eligible},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         user_prompt_context = serializer.validated_data.get("user_prompt_context", "")
         initial_payload = serializer.validated_data.get("payload_data") or {}
@@ -861,17 +927,9 @@ class SuratRequestCreateAPIView(APIView):
         raw_thread_id = request.data.get("thread_id")
         linked_thread = ChatThread.objects.filter(id=raw_thread_id, user=request.user).first() if raw_thread_id else None
 
-        student_metadata = {
-            "nim": student_obj.nim,
-            "nama": getattr(student_obj.user, "nama", ""),
-            "prodi": getattr(student_obj.prodi, "nama_prodi", ""),
-            "fakultas": getattr(student_obj.fakultas, "nama_fakultas", ""),
-            "semester_aktif": student_obj.semester_aktif,
-            "tahun_akademik": student_obj.tahun_akademik,
-        }
-
         surat_req = SuratRequest.objects.create(
-            student=student_obj,
+            student=req_profile if req_role == "STUDENT" else None,
+            requester_lecturer=req_profile if req_role == "LECTURER" else None,
             kode_surat=surat_type,
             status=SuratStatus.SUBMITTED,
             payload_data=initial_payload,
@@ -945,11 +1003,45 @@ def _filter_non_custom_for_lecturer(queryset, lecturer: Lecturer):
     jabs = " ".join(str(j).lower() for j in (getattr(lecturer, "jabatan_struktural", None) or []))
     if any(role in jabs for role in ("dekan", "wadek")):
         if lecturer.fakultas_id:
-            return queryset.filter(student__fakultas_id=lecturer.fakultas_id)
+            return queryset.filter(
+                Q(student__fakultas_id=lecturer.fakultas_id)
+                | Q(requester_lecturer__fakultas_id=lecturer.fakultas_id)
+            )
     elif lecturer.prodi_id:
-        return queryset.filter(student__prodi_id=lecturer.prodi_id)
+        return queryset.filter(
+            Q(student__prodi_id=lecturer.prodi_id)
+            | Q(requester_lecturer__prodi_id=lecturer.prodi_id)
+        )
     elif lecturer.fakultas_id:
-        return queryset.filter(student__fakultas_id=lecturer.fakultas_id)
+        return queryset.filter(
+            Q(student__fakultas_id=lecturer.fakultas_id)
+            | Q(requester_lecturer__fakultas_id=lecturer.fakultas_id)
+        )
+    return queryset
+
+
+def _filter_memory_for_lecturer(queryset, lecturer: Lecturer):
+    """Membatasi memori kalibrasi AI sesuai lingkup prodi/fakultas dosen (+ memori global)."""
+    jabs = " ".join(str(j).lower() for j in (getattr(lecturer, "jabatan_struktural", None) or []))
+    if any(role in jabs for role in ("dekan", "wadek")):
+        if lecturer.fakultas_id:
+            return queryset.filter(
+                Q(surat_request__isnull=True)
+                | Q(surat_request__student__fakultas_id=lecturer.fakultas_id)
+                | Q(surat_request__requester_lecturer__fakultas_id=lecturer.fakultas_id)
+            )
+    elif lecturer.prodi_id:
+        return queryset.filter(
+            Q(surat_request__isnull=True)
+            | Q(surat_request__student__prodi_id=lecturer.prodi_id)
+            | Q(surat_request__requester_lecturer__prodi_id=lecturer.prodi_id)
+        )
+    elif lecturer.fakultas_id:
+        return queryset.filter(
+            Q(surat_request__isnull=True)
+            | Q(surat_request__student__fakultas_id=lecturer.fakultas_id)
+            | Q(surat_request__requester_lecturer__fakultas_id=lecturer.fakultas_id)
+        )
     return queryset
 
 
@@ -964,7 +1056,9 @@ class SuratRequestListAPIView(ListAPIView):
             return SuratRequest.objects.filter(student=user.student_profile).order_by('-created_at')
         if hasattr(user, 'lecturer_profile'):
             lecturer = user.lecturer_profile
-            # Dosen hanya melihat surat kampus resmi; surat custom (pribadi) tidak pernah tampil di dashboard dosen.
+            if self.request.query_params.get('mine') == '1':
+                return SuratRequest.objects.filter(requester_lecturer=lecturer).order_by('-created_at')
+            # Monitoring dosen hanya menampilkan surat resmi kampus; surat custom pribadi tidak ditampilkan.
             non_custom = SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
             if not getattr(settings, 'REQUIRE_MANUAL_APPROVAL', False):
                 return _filter_non_custom_for_lecturer(non_custom, lecturer).order_by('-created_at')
@@ -982,8 +1076,16 @@ class SuratRequestDetailAPIView(RetrieveAPIView):
         if hasattr(user, 'student_profile'):
             return SuratRequest.objects.filter(student=user.student_profile)
         non_custom = SuratRequest.objects.exclude(kode_surat__kode_surat__startswith='CUSTOM')
-        if hasattr(user, 'lecturer_profile') and not getattr(settings, 'REQUIRE_MANUAL_APPROVAL', False):
-            return _filter_non_custom_for_lecturer(non_custom, user.lecturer_profile)
+        if hasattr(user, 'lecturer_profile'):
+            lecturer = user.lecturer_profile
+            if not getattr(settings, 'REQUIRE_MANUAL_APPROVAL', False):
+                scoped = _filter_non_custom_for_lecturer(non_custom, lecturer)
+                return SuratRequest.objects.filter(
+                    Q(pk__in=scoped.values('pk')) | Q(requester_lecturer=lecturer)
+                )
+            return SuratRequest.objects.filter(
+                Q(pk__in=non_custom.values('pk')) | Q(requester_lecturer=lecturer)
+            )
         return non_custom
 
 
@@ -1112,6 +1214,10 @@ class SuratVerifyAPIView(APIView):
                 'surat_request__student__user',
                 'surat_request__student__prodi',
                 'surat_request__student__fakultas',
+                'surat_request__requester_lecturer',
+                'surat_request__requester_lecturer__user',
+                'surat_request__requester_lecturer__prodi',
+                'surat_request__requester_lecturer__fakultas',
                 'surat_request__kode_surat',
                 'signer__user',
             ).get(token=token)
@@ -1125,7 +1231,7 @@ class SuratVerifyAPIView(APIView):
             )
 
         surat_req = tte_sig.surat_request
-        student = surat_req.student
+        req_user = surat_req.requester_user
         signer_display = (
             (surat_req.signer_nama_override or "").strip()
             or (tte_sig.signer.user.nama if tte_sig.signer else "Sistem Otomatis Kampus")
@@ -1142,10 +1248,11 @@ class SuratVerifyAPIView(APIView):
                     "tanggal_terbit": surat_req.created_at,
                 },
                 "mahasiswa": {
-                    "nim": student.nim,
-                    "nama": student.user.nama,
-                    "prodi": student.prodi.nama_prodi,
-                    "fakultas": student.fakultas.nama_fakultas,
+                    "nim": surat_req.requester_identifier or "-",
+                    "nama": getattr(req_user, "nama", "-"),
+                    "prodi": getattr(surat_req.requester_prodi, "nama_prodi", "-"),
+                    "fakultas": getattr(surat_req.requester_fakultas, "nama_fakultas", "-"),
+                    "requester_role": surat_req.requester_role,
                 },
                 "tte_info": {
                     "hash_sha256": tte_sig.hash_document,
@@ -1155,4 +1262,259 @@ class SuratVerifyAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class LecturerAiDraftListAPIView(APIView):
+    """Menampilkan 5 draf buatan AI terakhir per jenis/kategori surat untuk kalibrasi gaya bahasa."""
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def get(self, request):
+        try:
+            lecturer = request.user.lecturer_profile
+        except (Lecturer.DoesNotExist, AttributeError):
+            return Response(
+                {"error": "Hanya akun dosen/penanggung jawab yang dapat mengakses kalibrasi draf AI."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from .services.campus_catalog import CAMPUS_SURAT_CATALOG, ensure_campus_surat_types
+
+        ensure_campus_surat_types()
+        filter_kategori = str(request.query_params.get("kategori") or "").strip()
+        filter_kode = str(request.query_params.get("kode_surat") or "").strip().upper()
+
+        catalog_items = [
+            item for item in CAMPUS_SURAT_CATALOG
+            if not str(item.get("kode_surat") or "").upper().startswith("CUSTOM")
+        ]
+        categories = sorted({str(item["kategori"]) for item in catalog_items if item.get("kategori")})
+
+        base_qs = _filter_non_custom_for_lecturer(
+            SuratRequest.objects.exclude(kode_surat__kode_surat__startswith="CUSTOM")
+            .exclude(ai_original_draft__isnull=True)
+            .exclude(ai_original_draft="")
+            .select_related(
+                "kode_surat",
+                "student",
+                "student__user",
+                "student__prodi",
+                "student__fakultas",
+                "requester_lecturer",
+                "requester_lecturer__user",
+                "requester_lecturer__prodi",
+                "requester_lecturer__fakultas",
+            )
+            .prefetch_related("feedback_memories"),
+            lecturer,
+        )
+
+        groups = []
+        for item in catalog_items:
+            kode = str(item["kode_surat"]).upper()
+            kat = str(item.get("kategori") or "")
+            if filter_kategori and kat.lower() != filter_kategori.lower():
+                continue
+            if filter_kode and kode != filter_kode:
+                continue
+
+            recent_qs = base_qs.filter(kode_surat_id=kode).order_by("-created_at", "-id")[:5]
+            draft_rows = []
+            for req_obj in recent_qs:
+                memories = sorted(req_obj.feedback_memories.all(), key=lambda m: m.id, reverse=True)
+                latest_calibrated = next(
+                    (m.reference_draft for m in memories if m.reference_draft),
+                    None,
+                )
+                draft_rows.append(
+                    {
+                        "id": req_obj.id,
+                        "kode_surat": kode,
+                        "nama_surat": req_obj.kode_surat.nama_surat,
+                        "kategori": kat,
+                        "nomor_surat_resmi": req_obj.nomor_surat_resmi,
+                        "status": req_obj.status,
+                        "pemohon_nama": getattr(req_obj.requester_user, "nama", None) or "-",
+                        "pemohon_identitas": req_obj.requester_identifier or "-",
+                        "pemohon_role": req_obj.requester_role,
+                        "prodi_nama": getattr(req_obj.requester_prodi, "nama_prodi", None) or "-",
+                        "fakultas_nama": getattr(req_obj.requester_fakultas, "nama_fakultas", None) or "-",
+                        "self_critique_score": req_obj.self_critique_score,
+                        "payload_data": req_obj.payload_data or {},
+                        "ai_original_draft": req_obj.ai_original_draft or "",
+                        "calibrated_draft": latest_calibrated,
+                        "feedback_count": len(memories),
+                        "created_at": req_obj.created_at,
+                    }
+                )
+
+            active_rule_count = _filter_memory_for_lecturer(
+                AgentFeedbackMemory.objects.filter(kode_surat_id=kode, is_active=True),
+                lecturer,
+            ).count()
+
+            groups.append(
+                {
+                    "kode_surat": kode,
+                    "nama_surat": item["nama_surat"],
+                    "kategori": kat,
+                    "active_rule_count": active_rule_count,
+                    "drafts": draft_rows,
+                }
+            )
+
+        return Response(
+            {
+                "categories": categories,
+                "groups": groups,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LecturerAiDraftFeedbackAPIView(APIView):
+    """Menerima suntingan dosen atas draf AI untuk melatih AgentFeedbackMemory tanpa mengubah PDF historis."""
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def post(self, request, pk: int):
+        try:
+            lecturer = request.user.lecturer_profile
+        except (Lecturer.DoesNotExist, AttributeError):
+            return Response(
+                {"error": "Hanya akun dosen/penanggung jawab yang dapat memberikan kalibrasi draf AI."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        scoped_qs = _filter_non_custom_for_lecturer(
+            SuratRequest.objects.exclude(kode_surat__kode_surat__startswith="CUSTOM").select_related(
+                "kode_surat",
+                "student",
+                "student__prodi",
+                "student__fakultas",
+                "requester_lecturer",
+                "requester_lecturer__prodi",
+                "requester_lecturer__fakultas",
+            ),
+            lecturer,
+        )
+        surat_req = scoped_qs.filter(pk=pk).first()
+        if not surat_req:
+            return Response(
+                {"error": "Draf surat tidak ditemukan dalam cakupan prodi/fakultas Anda."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not (surat_req.ai_original_draft or "").strip():
+            return Response(
+                {"error": "Surat ini tidak memiliki draf asli buatan AI untuk dibandingkan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        edited_draft = str(request.data.get("edited_draft") or "").strip()
+        if not edited_draft:
+            return Response(
+                {"error": "Teks draf penyesuaian wajib diisi."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .agents.memory_agent import AgenticMemoryAgent
+
+        mem_agent = AgenticMemoryAgent()
+        memory_record = mem_agent.record_feedback_memory(
+            surat_request=surat_req,
+            ai_original_draft=surat_req.ai_original_draft,
+            final_approved_content=edited_draft,
+            allow_heuristic_fallback=True,
+        )
+
+        if memory_record is None:
+            return Response(
+                {
+                    "status": "no_significant_change",
+                    "learned": False,
+                    "message": "Tidak terdeteksi perubahan redaksional yang signifikan dari draf asli AI untuk dijadikan aturan baru.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        memory_record.reference_draft = edited_draft
+        memory_record.save(update_fields=["reference_draft"])
+
+        SuratAuditLog.objects.create(
+            surat_request=surat_req,
+            action_id="MEM_CAL",
+            action=f"AI_DRAFT_CALIBRATED_BY_{lecturer.id}"[:255],
+        )
+
+        return Response(
+            {
+                "status": "learned",
+                "learned": True,
+                "message": "Penyesuaian draf berhasil dipelajari ke AgentFeedbackMemory untuk generasi surat berikutnya.",
+                "memory": AgentFeedbackMemorySerializer(memory_record).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LecturerAiFeedbackMemoryListAPIView(APIView):
+    """Daftar aturan AgentFeedbackMemory aktif/nonaktif untuk dikurasi dosen."""
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def get(self, request):
+        try:
+            lecturer = request.user.lecturer_profile
+        except (Lecturer.DoesNotExist, AttributeError):
+            return Response(
+                {"error": "Hanya akun dosen/penanggung jawab yang dapat mengakses memori gaya bahasa AI."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        qs = _filter_memory_for_lecturer(
+            AgentFeedbackMemory.objects.select_related("kode_surat").order_by("-created_at", "-id"),
+            lecturer,
+        )
+        kode_surat = str(request.query_params.get("kode_surat") or "").strip().upper()
+        if kode_surat:
+            qs = qs.filter(kode_surat_id=kode_surat)
+
+        return Response(AgentFeedbackMemorySerializer(qs[:50], many=True).data, status=status.HTTP_200_OK)
+
+
+class LecturerAiFeedbackMemoryToggleAPIView(APIView):
+    """Mengaktifkan atau menonaktifkan aturan gaya bahasa AI di AgentFeedbackMemory."""
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def patch(self, request, pk: int):
+        try:
+            lecturer = request.user.lecturer_profile
+        except (Lecturer.DoesNotExist, AttributeError):
+            return Response(
+                {"error": "Hanya akun dosen/penanggung jawab yang dapat mengubah status aturan memori AI."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        mem = _filter_memory_for_lecturer(
+            AgentFeedbackMemory.objects.select_related("kode_surat"),
+            lecturer,
+        ).filter(pk=pk).first()
+        if not mem:
+            return Response({"error": "Aturan memori AI tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        if "is_active" not in request.data:
+            return Response({"error": "Field 'is_active' wajib dikirim."}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_val = request.data.get("is_active")
+        if isinstance(raw_val, bool):
+            mem.is_active = raw_val
+        elif isinstance(raw_val, str):
+            mem.is_active = raw_val.strip().lower() in ("true", "1", "yes")
+        else:
+            mem.is_active = bool(raw_val)
+
+        mem.save(update_fields=["is_active"])
+        return Response(AgentFeedbackMemorySerializer(mem).data, status=status.HTTP_200_OK)
 

@@ -146,7 +146,17 @@ def find_pending_revision(thread_id) -> Optional[object]:
 
     latest = (
         SuratRequest.objects.filter(chat_thread_id=thread_id)
-        .select_related("kode_surat", "student", "student__user", "student__prodi", "student__fakultas")
+        .select_related(
+            "kode_surat",
+            "student",
+            "student__user",
+            "student__prodi",
+            "student__fakultas",
+            "requester_lecturer",
+            "requester_lecturer__user",
+            "requester_lecturer__prodi",
+            "requester_lecturer__fakultas",
+        )
         .order_by("-id")
         .first()
     )
@@ -169,15 +179,17 @@ def _start_redraft(surat_req, instruction: str) -> None:
     from ..models import SuratStatus
     from ..views import _execute_redraft_agent_worker
 
-    student = surat_req.student
+    requester = surat_req.requester_profile
+    requester_user = surat_req.requester_user
     previous_payload = dict(surat_req.payload_data or {})
     meta = {
-        "nim": student.nim,
-        "nama": getattr(student.user, "nama", ""),
-        "prodi": getattr(student.prodi, "nama_prodi", ""),
-        "fakultas": getattr(student.fakultas, "nama_fakultas", ""),
-        "semester_aktif": student.semester_aktif,
-        "tahun_akademik": student.tahun_akademik,
+        "nim": surat_req.requester_identifier,
+        "nama": getattr(requester_user, "nama", ""),
+        "prodi": getattr(surat_req.requester_prodi, "nama_prodi", ""),
+        "fakultas": getattr(surat_req.requester_fakultas, "nama_fakultas", ""),
+        "semester_aktif": getattr(requester, "semester_aktif", "-"),
+        "tahun_akademik": getattr(requester, "tahun_akademik", "-"),
+        "peran": surat_req.requester_role,
     }
     surat_req.user_prompt_context = f"{surat_req.user_prompt_context or ''}\n\n[Revisi]: {instruction}".strip()
     surat_req.status = SuratStatus.SUBMITTED

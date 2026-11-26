@@ -7,6 +7,7 @@ from .models import (
     SuratAttachment,
     TteSignature,
     SuratAuditLog,
+    AgentFeedbackMemory,
 )
 from .services.validators import run_validators
 
@@ -174,8 +175,18 @@ class SuratAuditLogSerializer(serializers.ModelSerializer):
 class SuratRequestListSerializer(serializers.ModelSerializer):
     nama_surat = serializers.CharField(source='kode_surat.nama_surat', read_only=True)
     kategori = serializers.CharField(source='kode_surat.kategori', read_only=True)
-    nim_mahasiswa = serializers.CharField(source='student.nim', read_only=True)
-    nama_mahasiswa = serializers.CharField(source='student.user.nama', read_only=True)
+    nim_mahasiswa = serializers.SerializerMethodField()
+    nama_mahasiswa = serializers.SerializerMethodField()
+    requester_role = serializers.SerializerMethodField()
+
+    def get_nim_mahasiswa(self, obj):
+        return obj.requester_identifier or '-'
+
+    def get_nama_mahasiswa(self, obj):
+        return getattr(obj.requester_user, 'nama', None) or '-'
+
+    def get_requester_role(self, obj):
+        return obj.requester_role
 
     class Meta:
         model = SuratRequest
@@ -183,6 +194,7 @@ class SuratRequestListSerializer(serializers.ModelSerializer):
             'id',
             'nim_mahasiswa',
             'nama_mahasiswa',
+            'requester_role',
             'kode_surat',
             'nama_surat',
             'kategori',
@@ -194,15 +206,31 @@ class SuratRequestListSerializer(serializers.ModelSerializer):
 
 class SuratRequestDetailSerializer(serializers.ModelSerializer):
     nama_surat = serializers.CharField(source='kode_surat.nama_surat', read_only=True)
-    nama_mahasiswa = serializers.CharField(source='student.user.nama', read_only=True)
-    nim_mahasiswa = serializers.CharField(source='student.nim', read_only=True)
-    prodi_mahasiswa = serializers.CharField(source='student.prodi.nama_prodi', read_only=True)
-    fakultas_mahasiswa = serializers.CharField(source='student.fakultas.nama_fakultas', read_only=True)
+    nama_mahasiswa = serializers.SerializerMethodField()
+    nim_mahasiswa = serializers.SerializerMethodField()
+    prodi_mahasiswa = serializers.SerializerMethodField()
+    fakultas_mahasiswa = serializers.SerializerMethodField()
+    requester_role = serializers.SerializerMethodField()
 
     attachments = SuratAttachmentSerializer(many=True, read_only=True)
     approvals = SuratApprovalSerializer(many=True, read_only=True)
     signatures = TteSignatureSerializer(many=True, read_only=True)
     audit_logs = SuratAuditLogSerializer(many=True, read_only=True)
+
+    def get_nama_mahasiswa(self, obj):
+        return getattr(obj.requester_user, 'nama', None) or '-'
+
+    def get_nim_mahasiswa(self, obj):
+        return obj.requester_identifier or '-'
+
+    def get_prodi_mahasiswa(self, obj):
+        return getattr(obj.requester_prodi, 'nama_prodi', None) or '-'
+
+    def get_fakultas_mahasiswa(self, obj):
+        return getattr(obj.requester_fakultas, 'nama_fakultas', None) or '-'
+
+    def get_requester_role(self, obj):
+        return obj.requester_role
 
     class Meta:
         model = SuratRequest
@@ -210,6 +238,7 @@ class SuratRequestDetailSerializer(serializers.ModelSerializer):
             'id',
             'nim_mahasiswa',
             'nama_mahasiswa',
+            'requester_role',
             'prodi_mahasiswa',
             'fakultas_mahasiswa',
             'kode_surat',
@@ -233,4 +262,23 @@ class SuratRequestDetailSerializer(serializers.ModelSerializer):
             'approvals',
             'signatures',
             'audit_logs',
+        ]
+
+
+class AgentFeedbackMemorySerializer(serializers.ModelSerializer):
+    kode_surat = serializers.CharField(source='kode_surat_id', read_only=True)
+    nama_surat = serializers.CharField(source='kode_surat.nama_surat', read_only=True)
+
+    class Meta:
+        model = AgentFeedbackMemory
+        fields = [
+            'id',
+            'surat_request_id',
+            'kode_surat',
+            'nama_surat',
+            'diff_summary',
+            'extracted_rule',
+            'reference_draft',
+            'is_active',
+            'created_at',
         ]

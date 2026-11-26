@@ -70,7 +70,7 @@ def process_approval_action(
         surat_req.revision_notes = list(surat_req.revision_notes or []) + [catatan]
         surat_req.save(update_fields=['status', 'revision_notes'])
         notify_user(
-            surat_req.student.user,
+            surat_req.requester_user,
             'REVISION_REQUIRED',
             f'Revisi Diperlukan: {surat_req.kode_surat.nama_surat}',
             catatan or 'Dosen meminta revisi pada draf surat Anda.',
@@ -100,7 +100,7 @@ def process_approval_action(
         surat_req.status = 'REJECTED'
         surat_req.save(update_fields=['status'])
         notify_user(
-            surat_req.student.user,
+            surat_req.requester_user,
             'REJECTED',
             f'Surat Ditolak: {surat_req.kode_surat.nama_surat}',
             catatan or 'Dosen menolak pengajuan surat.',
@@ -234,13 +234,17 @@ def _execute_final_issuance_worker(
             'student__user',
             'student__fakultas',
             'student__prodi',
+            'requester_lecturer',
+            'requester_lecturer__user',
+            'requester_lecturer__fakultas',
+            'requester_lecturer__prodi',
             'chat_thread',
         ).get(pk=surat_request_id)
 
         signer = Lecturer.objects.filter(pk=signer_lecturer_id).first() if signer_lecturer_id else None
         if signer is None:
             from .manual_handlers import resolve_official_approver
-            signer = resolve_official_approver(surat_req.student, surat_req.kode_surat.kode_surat)
+            signer = resolve_official_approver(surat_req.requester_profile, surat_req.kode_surat.kode_surat)
         resolved_content = surat_req.final_approved_content or surat_req.ai_original_draft or ""
 
         tools = SuratExecutionTools()
@@ -281,7 +285,7 @@ def _execute_final_issuance_worker(
             f"Buka sesi chat untuk melihat PDF, mengirim ke Email, atau mencetak ke Printer."
         )
         notify_user(
-            surat_req.student.user,
+            surat_req.requester_user,
             'APPROVED',
             f'Surat Terbit: {surat_req.kode_surat.nama_surat}',
             notif_body,

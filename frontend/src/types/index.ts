@@ -54,6 +54,7 @@ export interface SuratRequestListItem {
   id: number;
   nim_mahasiswa: string;
   nama_mahasiswa: string;
+  requester_role?: "STUDENT" | "LECTURER";
   kode_surat: string;
   nama_surat: string;
   kategori: string;
@@ -68,6 +69,7 @@ export interface SuratRequestDetail {
   nama_mahasiswa: string;
   prodi_mahasiswa: string;
   fakultas_mahasiswa: string;
+  requester_role?: "STUDENT" | "LECTURER";
   kode_surat: string;
   nama_surat: string;
   nomor_surat_resmi: string | null;
@@ -170,4 +172,56 @@ export interface VerificationData {
     penandatangan: string;
     tanggal_ttd: string;
   };
+}
+
+export interface AiDraftItem {
+  id: number;
+  kode_surat: string;
+  nama_surat: string;
+  kategori: string;
+  nomor_surat_resmi: string | null;
+  status: SuratStatusCode;
+  pemohon_nama: string;
+  pemohon_identitas: string;
+  pemohon_role: "STUDENT" | "LECTURER";
+  prodi_nama: string;
+  fakultas_nama: string;
+  self_critique_score: number | null;
+  payload_data: Record<string, unknown>;
+  ai_original_draft: string;
+  calibrated_draft: string | null;
+  feedback_count: number;
+  created_at: string;
+}
+
+export interface AiDraftGroup {
+  kode_surat: string;
+  nama_surat: string;
+  kategori: string;
+  active_rule_count: number;
+  drafts: AiDraftItem[];
+}
+
+export interface AiDraftListResponse {
+  categories: string[];
+  groups: AiDraftGroup[];
+}
+
+export interface AiFeedbackMemoryItem {
+  id: number;
+  surat_request_id: number | null;
+  kode_surat: string;
+  nama_surat: string;
+  diff_summary: string;
+  extracted_rule: string;
+  reference_draft: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface AiDraftFeedbackResponse {
+  status: "learned" | "no_significant_change";
+  learned: boolean;
+  message: string;
+  memory?: AiFeedbackMemoryItem;
 }

@@ -5,9 +5,9 @@ from ..models import TteSignature
 def create_tte_signature(surat_request, signer=None):
     """
     Membuat sidik jari kriptografis SHA-256 yang mengikat isi naskah surat,
-    nomor surat resmi, identitas mahasiswa, serta penandatangan, beserta token QR Code TTE.
+    nomor surat resmi, identitas pemohon, serta penandatangan, beserta token QR Code TTE.
     """
-    student = surat_request.student
+    requester_code = surat_request.requester_identifier or "AUTO"
     
     # Ambil isi naskah surat final yang disetujui untuk diikat ke dalam hash SHA-256
     letter_content = (
@@ -24,7 +24,7 @@ def create_tte_signature(surat_request, signer=None):
 
     # Merangkai string integritas dokumen untuk di-hash
     raw_string = (
-        f"{student.nim}|{surat_request.kode_surat.kode_surat}|{nomor_resmi}|"
+        f"{requester_code}|{surat_request.kode_surat.kode_surat}|{nomor_resmi}|"
         f"{signer_id}|{content_digest}|{token}"
     )
     document_hash = hashlib.sha256(raw_string.encode("utf-8")).hexdigest()

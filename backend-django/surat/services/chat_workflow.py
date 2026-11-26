@@ -365,13 +365,22 @@ def handle_incoming_chat_with_redis(
                     if thread_obj else []
                 )
                 _stu = {}
-                _student = getattr(getattr(thread_obj, 'user', None), 'student_profile', None) if thread_obj else None
+                _u = getattr(thread_obj, 'user', None) if thread_obj else None
+                _student = getattr(_u, 'student_profile', None)
+                _lecturer = getattr(_u, 'lecturer_profile', None)
                 if _student:
                     _stu = {
-                        'nama': getattr(getattr(_student, 'user', None), 'nama', '-'),
+                        'nama': getattr(_u, 'nama', '-'),
                         'nim': getattr(_student, 'nim', '-'),
                         'prodi': getattr(getattr(_student, 'prodi', None), 'nama_prodi', '-'),
                         'semester': getattr(_student, 'semester_aktif', '-'),
+                    }
+                elif _lecturer:
+                    _stu = {
+                        'nama': getattr(_u, 'nama', '-'),
+                        'nim': getattr(_u, 'nip_nim', '-'),
+                        'prodi': getattr(getattr(_lecturer, 'prodi', None), 'nama_prodi', '-'),
+                        'semester': ', '.join(getattr(_lecturer, 'jabatan_struktural', None) or []) or 'Dosen',
                     }
                 _smart = generate_conversational_reply(user_message=cleaned_msg, history_messages=_hist, student_info=_stu)
                 if _smart:

@@ -257,6 +257,9 @@ export const StudentChatPage: React.FC = () => {
             }}
             onLogout={() => void logout()}
             onCollapseSidebar={() => setSidebarOpen(false)}
+            onBackToLecturerDashboard={
+              user.role === 'LECTURER' ? () => navigate('/approvals') : undefined
+            }
           />
         </div>
       )}
@@ -279,6 +282,14 @@ export const StudentChatPage: React.FC = () => {
             }}
             onLogout={() => void logout()}
             onCollapseSidebar={() => setMobileMenuOpen(false)}
+            onBackToLecturerDashboard={
+              user.role === 'LECTURER'
+                ? () => {
+                    setMobileMenuOpen(false);
+                    navigate('/approvals');
+                  }
+                : undefined
+            }
           />
           <div className="flex-1 bg-[#27211e]/40" onClick={() => setMobileMenuOpen(false)} />
         </div>
@@ -504,7 +515,11 @@ export const StudentChatPage: React.FC = () => {
                     void handleSendMessage();
                   }
                 }}
-                placeholder="Ceritakan surat yang ingin kamu buat..."
+                placeholder={
+                  user.role === 'LECTURER'
+                    ? 'Ceritakan surat resmi atau surat pribadi yang ingin Anda buat...'
+                    : 'Ceritakan surat yang ingin kamu buat...'
+                }
                 className="flex-1 bg-transparent resize-none border-0 text-xs sm:text-sm text-[#27211e] placeholder:text-[#857870] focus:outline-none py-1 max-h-36"
               />
               <button
@@ -517,8 +532,8 @@ export const StudentChatPage: React.FC = () => {
               </button>
             </form>
             <p className="text-center text-[10px] text-[#857870] mt-2">
-              ASURA dapat membantu mengumpulkan detail, menyiapkan draf, dan meneruskan surat sesuai
-              alur persetujuan.
+              ASURA mengumpulkan detail, menyusun draf dengan AI, dan menerbitkan surat otomatis
+              untuk diunduh PDF, dikirim email, atau dicetak.
             </p>
           </div>
         </div>

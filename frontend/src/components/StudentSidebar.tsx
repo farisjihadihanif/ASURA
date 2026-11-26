@@ -1,4 +1,4 @@
-﻿import React from 'react';
+import React from 'react';
 import {
   Plus,
   FileText,
@@ -7,6 +7,7 @@ import {
   Sparkles,
   PanelLeftClose,
   Trash2,
+  ArrowLeft,
 } from 'lucide-react';
 import AccountSwitcher from "./AccountSwitcher";
 import type { ChatThreadItem, SuratType, User } from '../types';
@@ -21,6 +22,7 @@ interface StudentSidebarProps {
   onPickSuratPrompt: (suratType: SuratType) => void;
   onLogout: () => void;
   onCollapseSidebar?: () => void;
+  onBackToLecturerDashboard?: () => void;
 }
 export const StudentSidebar: React.FC<StudentSidebarProps> = ({
   user,
@@ -33,6 +35,7 @@ export const StudentSidebar: React.FC<StudentSidebarProps> = ({
   onPickSuratPrompt,
   onLogout,
   onCollapseSidebar,
+  onBackToLecturerDashboard,
 }) => {
   return (
     <aside className="w-[270px] h-full bg-[#fbf5f0] text-[#27211e] flex flex-col border-r border-[#eadfd7] select-none">
@@ -52,7 +55,17 @@ export const StudentSidebar: React.FC<StudentSidebarProps> = ({
           </button>
         )}
       </div>
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-3 space-y-2">
+        {onBackToLecturerDashboard && (
+          <button
+            type="button"
+            onClick={onBackToLecturerDashboard}
+            className="w-full flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#27211e] hover:bg-[#3d3430] text-white text-xs font-medium transition cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+            <span>Kembali ke Dashboard Dosen</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={onNewChat}

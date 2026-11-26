@@ -1,4 +1,4 @@
-﻿import api from './api';
+import api from './api';
 import type {
   SuratType,
   SuratRequestListItem,
@@ -7,6 +7,9 @@ import type {
   ChatSessionDetail,
   NotificationItem,
   VerificationData,
+  AiDraftListResponse,
+  AiFeedbackMemoryItem,
+  AiDraftFeedbackResponse,
 } from '../types';
 export const suratService = {
   async getSuratTypes(): Promise<SuratType[]> {
@@ -134,6 +137,45 @@ export const suratService = {
   },
   async verifySurat(token: string): Promise<VerificationData> {
     const res = await api.get<VerificationData>(`/api/surat/verify/${token}/`);
+    return res.data;
+  },
+  async getMySuratRequests(): Promise<SuratRequestListItem[]> {
+    const res = await api.get<SuratRequestListItem[]>('/api/surat/requests/', {
+      params: { mine: 1 },
+    });
+    return Array.isArray(res.data) ? res.data : [];
+  },
+  async getAiDrafts(params?: {
+    kategori?: string;
+    kode_surat?: string;
+  }): Promise<AiDraftListResponse> {
+    const res = await api.get<AiDraftListResponse>('/api/surat/ai-drafts/', { params });
+    return res.data;
+  },
+  async submitAiDraftFeedback(
+    requestId: number,
+    editedDraft: string,
+  ): Promise<AiDraftFeedbackResponse> {
+    const res = await api.post<AiDraftFeedbackResponse>(
+      `/api/surat/ai-drafts/${requestId}/feedback/`,
+      { edited_draft: editedDraft },
+    );
+    return res.data;
+  },
+  async getAiFeedbackMemories(kodeSurat?: string): Promise<AiFeedbackMemoryItem[]> {
+    const res = await api.get<AiFeedbackMemoryItem[]>('/api/surat/ai-feedback-memories/', {
+      params: kodeSurat ? { kode_surat: kodeSurat } : undefined,
+    });
+    return Array.isArray(res.data) ? res.data : [];
+  },
+  async toggleAiFeedbackMemory(
+    memoryId: number,
+    isActive: boolean,
+  ): Promise<AiFeedbackMemoryItem> {
+    const res = await api.patch<AiFeedbackMemoryItem>(
+      `/api/surat/ai-feedback-memories/${memoryId}/`,
+      { is_active: isActive },
+    );
     return res.data;
   },
 };

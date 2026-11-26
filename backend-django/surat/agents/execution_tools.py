@@ -109,7 +109,9 @@ class SuratExecutionTools:
 
         try:
             number_fn = _resolve_number_fn()
-            fakultas = getattr(surat_request.student, "fakultas", None)
+            fakultas = getattr(surat_request, "requester_fakultas", None) or getattr(
+                getattr(surat_request, "student", None), "fakultas", None
+            )
             nomor_resmi = number_fn(surat_request.kode_surat, fakultas=fakultas)
             if not nomor_resmi or not str(nomor_resmi).strip():
                 raise ValueError("Fungsi generate_surat_number mengembalikan nilai kosong.")
@@ -185,11 +187,18 @@ class SuratExecutionTools:
         final_approved_content: Optional[str] = None,
         signer: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        student = surat_request.student
-        user_obj = getattr(student, "user", None)
-        prodi_obj = getattr(student, "prodi", None)
-        fakultas_obj = getattr(student, "fakultas", None)
+        student = surat_request.requester_profile
+        user_obj = surat_request.requester_user
+        prodi_obj = surat_request.requester_prodi
+        fakultas_obj = surat_request.requester_fakultas
         surat_type_obj = getattr(surat_request, "kode_surat", None)
+        requester_role = surat_request.requester_role
+        requester_identifier = surat_request.requester_identifier
+        jabatan_pemohon = (
+            ", ".join(getattr(student, "jabatan_struktural", None) or [])
+            if requester_role == "LECTURER"
+            else ""
+        )
 
         effective_signer = signer
         if effective_signer is None and student is not None:
@@ -252,7 +261,9 @@ class SuratExecutionTools:
             "id": surat_request.id,
             "surat_request_id": surat_request.id,
             "nama_mahasiswa": getattr(user_obj, "nama", ""),
-            "nim": getattr(student, "nim", ""),
+            "nim": requester_identifier,
+            "requester_role": requester_role,
+            "jabatan_pemohon": jabatan_pemohon,
             "program_studi": getattr(prodi_obj, "nama_prodi", ""),
             "prodi": getattr(prodi_obj, "nama_prodi", ""),
             "fakultas": getattr(fakultas_obj, "nama_fakultas", ""),

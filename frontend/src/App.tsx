@@ -30,7 +30,7 @@ export const App: React.FC = () => {
           <Route
             path="/chat"
             element={
-              <ProtectedRoute allowedRoles={["STUDENT"]}>
+              <ProtectedRoute allowedRoles={["STUDENT", "LECTURER"]}>
                 <StudentChatPage />
               </ProtectedRoute>
             }
@@ -38,7 +38,7 @@ export const App: React.FC = () => {
           <Route
             path="/chat/:threadId"
             element={
-              <ProtectedRoute allowedRoles={["STUDENT"]}>
+              <ProtectedRoute allowedRoles={["STUDENT", "LECTURER"]}>
                 <StudentChatPage />
               </ProtectedRoute>
             }

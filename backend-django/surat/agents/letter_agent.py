@@ -356,11 +356,19 @@ class SuratDraftingAgent:
                             surat_request__student__prodi__nama_prodi__iexact=prodi_name
                         ).values_list("extracted_rule", flat=True)[:20]
                         candidate_rules.extend(list(prodi_qs))
+                        lec_prodi_qs = base_qs.filter(
+                            surat_request__requester_lecturer__prodi__nama_prodi__iexact=prodi_name
+                        ).values_list("extracted_rule", flat=True)[:20]
+                        candidate_rules.extend(list(lec_prodi_qs))
                     if fakultas_name:
                         fak_qs = base_qs.filter(
                             surat_request__student__fakultas__nama_fakultas__iexact=fakultas_name
                         ).values_list("extracted_rule", flat=True)[:20]
                         candidate_rules.extend(list(fak_qs))
+                        lec_fak_qs = base_qs.filter(
+                            surat_request__requester_lecturer__fakultas__nama_fakultas__iexact=fakultas_name
+                        ).values_list("extracted_rule", flat=True)[:20]
+                        candidate_rules.extend(list(lec_fak_qs))
                     # Sertakan aturan global yang tidak terikat pada surat_request fakultas lain
                     global_qs = base_qs.filter(
                         surat_request__isnull=True
@@ -392,16 +400,35 @@ class SuratDraftingAgent:
     @staticmethod
     def _load_lecturer_exemplar(kode_surat: str) -> str:
         """
-        Memori belajar: ambil isi surat terakhir yang DIREVISI dosen sebelum di-ACC untuk
-        jenis surat yang sama, lalu jadikan contoh acuan redaksi. Hanya teks isi surat
-        (tanpa file/gambar tanda tangan) dan data identitas disensor. Surat custom dilewati.
+        Memori belajar: ambil naskah terkalibrasi terbaru dari `AgentFeedbackMemory.reference_draft`
+        atau isi surat ter-ACC yang pernah direvisi dosen untuk jenis surat yang sama,
+        lalu jadikan contoh acuan redaksi tanpa menyertakan PII pemohon. Surat custom dilewati.
         """
         try:
-            from surat.models import SuratRequest
+            from surat.models import AgentFeedbackMemory, SuratRequest
             from surat.agents.memory_agent import AgenticMemoryAgent
 
             if not kode_surat or kode_surat.startswith("CUSTOM"):
                 return ""
+
+            calibrated = (
+                AgentFeedbackMemory.objects.filter(kode_surat_id=kode_surat, is_active=True)
+                .exclude(reference_draft__isnull=True)
+                .exclude(reference_draft="")
+                .order_by("-id")
+                .first()
+            )
+            calibrated_txt = getattr(calibrated, "reference_draft", None) if calibrated is not None else None
+            if isinstance(calibrated_txt, str) and calibrated_txt.strip():
+                clean = AgenticMemoryAgent._sanitize_pii_from_text(calibrated_txt)
+                if clean.strip():
+                    return (
+                        "CONTOH ISI SURAT TERKALIBRASI DOSEN untuk jenis surat ini. "
+                        "Tiru struktur, redaksi, dan urutan paragrafnya; ganti hanya data spesifik "
+                        "(nama, NIM/NIP, instansi, tanggal, dll) dengan data permohonan saat ini:\n"
+                        + clean[:2000]
+                    )
+
             candidates = (
                 SuratRequest.objects.filter(kode_surat_id=kode_surat, status__in=["APPROVED", "SENT", "PRINTED"])
                 .exclude(final_approved_content__isnull=True)
@@ -416,7 +443,7 @@ class SuratDraftingAgent:
                     return (
                         "CONTOH ISI SURAT YANG SUDAH DIREVISI DAN DISETUJUI DOSEN untuk jenis surat ini. "
                         "Tiru struktur, redaksi, dan urutan paragrafnya; ganti hanya data spesifik "
-                        "(nama, NIM, instansi, tanggal, dll) dengan data permohonan saat ini:\n"
+                        "(nama, NIM/NIP, instansi, tanggal, dll) dengan data permohonan saat ini:\n"
                         + clean[:2000]
                     )
         except Exception:
