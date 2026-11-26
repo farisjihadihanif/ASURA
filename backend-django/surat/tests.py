@@ -657,3 +657,310 @@ class ConversationFlowStructuredStatesTestCase(TestCase):
         self.assertEqual(collected.get("target_destination_address"), "julian@pertamina.test")
         self.assertTrue(response.data.get("is_ready_to_draft"))
         self.assertIsNone(response.data.get("action_required"))
+
+
+class DefectFixesVerificationTestCase(TestCase):
+    """Memverifikasi seluruh perbaikan bug pra-V2 pada chat_workflow, models, views, views_extra, agents, dan accounts."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        self.user_dekan = User.objects.create(
+            id="u-dekan-fix",
+            nama="Prof. Dekan Teknik",
+            nip_nim="197001011999011001",
+            role="LECTURER",
+            password="pass",
+        )
+        self.user_kaprodi = User.objects.create(
+            id="u-kaprodi-fix",
+            nama="Dr. Kaprodi Informatika",
+            nip_nim="198202022006011002",
+            role="LECTURER",
+            password="pass",
+        )
+        self.user_owner = User.objects.create(
+            id="u-mhs-owner",
+            nama="Mahasiswa Pemilik",
+            nip_nim="210002001",
+            role="STUDENT",
+            password="pass",
+        )
+        self.user_other = User.objects.create(
+            id="u-mhs-other",
+            nama="Mahasiswa Lain",
+            nip_nim="210002002",
+            role="STUDENT",
+            password="pass",
+        )
+
+        self.fakultas = Faculty.objects.create(id="FT-FIX", nama_fakultas="Fakultas Teknik")
+        self.prodi = Department.objects.create(id="INF-FIX", fakultas=self.fakultas, nama_prodi="Informatika")
+
+        self.lec_dekan = Lecturer.objects.create(
+            id="l-dekan-fix",
+            user=self.user_dekan,
+            fakultas=self.fakultas,
+            prodi=self.prodi,
+            jabatan_struktural=["Dekan Fakultas Teknik"],
+        )
+        self.lec_kaprodi = Lecturer.objects.create(
+            id="l-kaprodi-fix",
+            user=self.user_kaprodi,
+            fakultas=self.fakultas,
+            prodi=self.prodi,
+            jabatan_struktural=["Ketua Program Studi Informatika"],
+        )
+        self.fakultas.dekan = self.lec_dekan
+        self.fakultas.save()
+        self.prodi.kaprodi = self.lec_kaprodi
+        self.prodi.save()
+
+        self.student_owner = Student.objects.create(
+            nim="210002001",
+            user=self.user_owner,
+            fakultas=self.fakultas,
+            prodi=self.prodi,
+            semester_aktif=7,
+            tahun_akademik="2026/2027",
+            tahun_masuk=2021,
+        )
+        self.student_other = Student.objects.create(
+            nim="210002002",
+            user=self.user_other,
+            fakultas=self.fakultas,
+            prodi=self.prodi,
+            semester_aktif=5,
+            tahun_akademik="2026/2027",
+            tahun_masuk=2022,
+        )
+
+        self.type_custom = SuratType.objects.create(
+            kode_surat="CUSTOM-SURAT",
+            nama_surat="Surat Custom Pribadi",
+            kategori="Custom",
+            is_auto_approval=True,
+            required_payload_fields=[{"field": "isi_permintaan", "label": "Isi Permintaan", "type": "string"}],
+        )
+        self.type_simag = SuratType.objects.create(
+            kode_surat="SI-MAG",
+            nama_surat="Surat Permohonan Izin Magang",
+            kategori="Surat Izin",
+            is_auto_approval=False,
+            required_payload_fields=[
+                {"field": "instansi_tujuan", "label": "Instansi", "type": "string"},
+                {"field": "posisi_magang", "label": "Posisi Magang", "type": "string"},
+                {"field": "tanggal_mulai", "label": "Tanggal Mulai", "type": "date"},
+                {"field": "tanggal_selesai", "label": "Tanggal Selesai", "type": "date"},
+            ],
+        )
+        self.type_skmk = SuratType.objects.create(
+            kode_surat="SK-MK",
+            nama_surat="Surat Keterangan Masih Kuliah",
+            kategori="Surat Keterangan",
+            is_auto_approval=False,
+            required_payload_fields=[{"field": "keperluan_surat", "label": "Keperluan", "type": "string"}],
+        )
+
+    def test_chat_workflow_restored_regexes_and_catalog_slot_aliases(self):
+        from surat.services.chat_workflow import (
+            extract_composite_slots_deterministically,
+            is_out_of_context_message,
+            sanitize_extracted_slot,
+        )
+
+        slots_magang = extract_composite_slots_deterministically(
+            "di PT Telkom Indonesia sebagai Backend Engineer dari tanggal 1 Mei 2026 sampai 30 Juli 2026",
+            [
+                {"field": "instansi_tujuan"},
+                {"field": "posisi_magang"},
+                {"field": "tanggal_mulai"},
+                {"field": "tanggal_selesai"},
+            ],
+            {},
+        )
+        self.assertEqual(slots_magang.get("instansi_tujuan"), "PT Telkom Indonesia")
+        self.assertEqual(slots_magang.get("posisi_magang"), "Backend Engineer")
+        self.assertEqual(slots_magang.get("tanggal_mulai"), "2026-05-01")
+        self.assertEqual(slots_magang.get("tanggal_selesai"), "2026-07-30")
+
+        slots_skmk = extract_composite_slots_deterministically(
+            "keperluan pengajuan beasiswa unggulan",
+            [{"field": "keperluan_surat"}],
+            {},
+        )
+        self.assertEqual(slots_skmk.get("keperluan_surat"), "Pengajuan Beasiswa Unggulan")
+        self.assertTrue(is_out_of_context_message("kopi arabika enak?"))
+        self.assertFalse(is_out_of_context_message("kopi arabika enak"))
+        self.assertEqual(sanitize_extracted_slot("keperluan_surat", "untuk mengurus beasiswa"), "mengurus beasiswa")
+
+    @patch("surat.services.pdf_generator_safe.generate_and_save_official_pdf", return_value="/tmp/custom_dummy.pdf")
+    def test_custom_letter_status_sent_and_printed_not_overwritten(self, _mock_pdf):
+        custom_req = SuratRequest.objects.create(
+            student=self.student_owner,
+            kode_surat=self.type_custom,
+            final_approved_content="Isi surat izin kegiatan resmi organisasi.",
+            ai_original_draft="Isi surat izin kegiatan resmi organisasi.",
+            payload_data={"judul_surat": "SURAT IZIN KEGIATAN"},
+        )
+        self.assertEqual(custom_req.status, SuratStatus.APPROVED)
+
+        custom_req.status = SuratStatus.PRINTED
+        custom_req.save(update_fields=["status"])
+        custom_req.refresh_from_db()
+        self.assertEqual(custom_req.status, SuratStatus.PRINTED)
+
+        custom_req.status = SuratStatus.SENT
+        custom_req.save()
+        custom_req.refresh_from_db()
+        self.assertEqual(custom_req.status, SuratStatus.SENT)
+
+    def test_chat_session_message_missing_thread_and_empty_body(self):
+        self.client.force_authenticate(user=self.user_owner)
+        res_missing = self.client.post("/api/surat/chat/00000000-0000-0000-0000-000000000000/", {}, format="json")
+        self.assertEqual(res_missing.status_code, 404)
+
+        thread = ChatThread.objects.create(user=self.user_owner, title="Sesi")
+        res_empty = self.client.post(f"/api/surat/chat/{thread.id}/", {}, format="json")
+        self.assertEqual(res_empty.status_code, 400)
+
+    def test_drafting_worker_uses_min_score_8_via_evaluate_draft_readiness(self):
+        from surat.views import _execute_drafting_agent_worker
+
+        surat_req = SuratRequest.objects.create(
+            student=self.student_owner,
+            kode_surat=self.type_skmk,
+            payload_data={"keperluan_surat": "Beasiswa"},
+            status=SuratStatus.SUBMITTED,
+        )
+        mock_output = MagicMock()
+        mock_output.to_payload_dict.return_value = {"keperluan_surat": "Beasiswa"}
+        mock_output.ai_original_draft = "Draf surat keterangan."
+        mock_output.evaluation.self_critique_score = 7
+        mock_output.evaluation.revision_notes = ["Perlu perbaikan redaksi."]
+        mock_output.evaluation.has_missing_info = False
+
+        mock_agent = MagicMock()
+        mock_agent.draft_letter.return_value = mock_output
+        mock_agent.get_required_fields_for_kode.return_value = [
+            {"field": "keperluan_surat", "label": "Keperluan Surat", "type": "string"}
+        ]
+
+        _execute_drafting_agent_worker(
+            surat_request_id=surat_req.id,
+            user_prompt_context="Keperluan beasiswa",
+            kode_surat="SK-MK",
+            agent=mock_agent,
+        )
+        surat_req.refresh_from_db()
+        self.assertEqual(surat_req.status, SuratStatus.REVISION_REQUIRED)
+
+    @patch("surat.views_extra._ensure_pdf_on_disk")
+    @patch("surat.services.pdf_generator_safe.generate_and_save_official_pdf", return_value="/tmp/custom_dummy.pdf")
+    def test_views_extra_auth_ownership_and_chat_feedback(self, _mock_pdf, mock_ensure_pdf):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
+            tmp_pdf.write(b"%PDF-1.4\n%test\n")
+            tmp_pdf_path = tmp_pdf.name
+        try:
+            mock_ensure_pdf.return_value = tmp_pdf_path
+            thread = ChatThread.objects.create(user=self.user_owner, title="Custom")
+            custom_req = SuratRequest.objects.create(
+                student=self.student_owner,
+                kode_surat=self.type_custom,
+                chat_thread=thread,
+                final_approved_content="Isi surat custom pemilik.",
+                ai_original_draft="Isi surat custom pemilik.",
+                payload_data={"judul_surat": "SURAT PRIBADI"},
+            )
+            official_req = SuratRequest.objects.create(
+                student=self.student_owner,
+                kode_surat=self.type_simag,
+                final_approved_content="Isi surat resmi magang.",
+                payload_data={"instansi_tujuan": "PT ABC", "posisi_magang": "QA", "tanggal_mulai": "2026-05-01", "tanggal_selesai": "2026-06-01"},
+                status=SuratStatus.APPROVED,
+            )
+
+            # 1. Anonymous blocked on preview/download/print/email/signature
+            self.client.force_authenticate(user=None)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{custom_req.id}/preview-pdf/").status_code, 401)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{custom_req.id}/download-pdf/").status_code, 401)
+            self.assertEqual(self.client.post(f"/api/surat/requests/{custom_req.id}/mark-printed/").status_code, 401)
+            self.assertEqual(
+                self.client.post(f"/api/surat/requests/{custom_req.id}/deliver-email/", {"recipient_email": "a@b.c"}).status_code,
+                401,
+            )
+            self.assertEqual(self.client.post(f"/api/surat/requests/{custom_req.id}/upload-signature/").status_code, 401)
+
+            # 2. Other student blocked (IDOR prevention)
+            self.client.force_authenticate(user=self.user_other)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{official_req.id}/preview-pdf/").status_code, 403)
+            self.assertEqual(self.client.post(f"/api/surat/requests/{custom_req.id}/mark-printed/").status_code, 403)
+
+            # 3. Lecturer cannot preview CUSTOM letter, can preview official campus letter
+            self.client.force_authenticate(user=self.user_kaprodi)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{custom_req.id}/preview-pdf/").status_code, 403)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{official_req.id}/preview-pdf/").status_code, 200)
+
+            # 4. Owner can preview & mark-printed, persisting PRINTED + writing ChatMessage feedback
+            self.client.force_authenticate(user=self.user_owner)
+            self.assertEqual(self.client.get(f"/api/surat/requests/{custom_req.id}/preview-pdf/").status_code, 200)
+            res_print = self.client.post(f"/api/surat/requests/{custom_req.id}/mark-printed/")
+            self.assertEqual(res_print.status_code, 200)
+            custom_req.refresh_from_db()
+            self.assertEqual(custom_req.status, SuratStatus.PRINTED)
+            self.assertTrue(ChatMessage.objects.filter(thread=thread, message__icontains="telah dicetak").exists())
+        finally:
+            import os
+            if os.path.exists(tmp_pdf_path):
+                os.remove(tmp_pdf_path)
+
+    def test_resolve_signer_and_execution_tools_follow_dekan_kaprodi_catalog(self):
+        from surat.views_extra import _resolve_signer
+
+        req_simag = SuratRequest.objects.create(
+            student=self.student_owner,
+            kode_surat=self.type_simag,
+            payload_data={},
+            status=SuratStatus.APPROVED,
+        )
+        req_skmk = SuratRequest.objects.create(
+            student=self.student_owner,
+            kode_surat=self.type_skmk,
+            payload_data={},
+            status=SuratStatus.APPROVED,
+        )
+
+        self.assertEqual(_resolve_signer(req_simag)[1], self.user_kaprodi.nip_nim)
+        self.assertEqual(_resolve_signer(req_skmk)[1], self.user_dekan.nip_nim)
+
+        tools = SuratExecutionTools()
+        ctx_simag = tools.build_pdf_template_context(
+            req_simag,
+            nomor_surat="001/SI-MAG/FT/2026",
+            qr_code_url="https://example.test/verify/1",
+        )
+        ctx_skmk = tools.build_pdf_template_context(
+            req_skmk,
+            nomor_surat="002/SK-MK/FT/2026",
+            qr_code_url="https://example.test/verify/2",
+        )
+        self.assertEqual(ctx_simag["signer_nip"], self.user_kaprodi.nip_nim)
+        self.assertEqual(ctx_skmk["signer_nip"], self.user_dekan.nip_nim)
+
+    def test_account_token_refresh_endpoint_returns_new_access_token(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        refresh = RefreshToken()
+        refresh["user_id"] = self.user_owner.id
+        refresh["role"] = self.user_owner.role
+        refresh["nip_nim"] = self.user_owner.nip_nim
+
+        self.client.force_authenticate(user=None)
+        res = self.client.post("/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("access", res.data)
+
+        res_bad = self.client.post("/api/accounts/token/refresh/", {"refresh": "invalid.token.value"}, format="json")
+        self.assertEqual(res_bad.status_code, 401)

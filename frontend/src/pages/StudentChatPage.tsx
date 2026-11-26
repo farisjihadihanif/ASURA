@@ -167,7 +167,7 @@ export const StudentChatPage: React.FC = () => {
         {
           id: `err-sub-${Date.now()}`,
           sender: 'assistant',
-          text: extractErrorMessage(err, 'Gagal mengAjukan Surat ke Dosen.'),
+          text: extractErrorMessage(err, 'Gagal mengajukan surat ke dosen.'),
         },
       ]);
     } finally {
@@ -332,8 +332,8 @@ export const StudentChatPage: React.FC = () => {
                 </div>
                 <div className="flex flex-wrap justify-center gap-2 pt-2">
                   {[
-                    'Saya ingin membuat Surat Keterangan Aktif Kuliah (SK-KUL).',
-                    'Saya butuh Surat Pengantar Magang ke PT Telkom Indonesia.',
+                    'Saya ingin membuat Surat Keterangan Masih Kuliah (SK-MK).',
+                    'Saya butuh Surat Permohonan Izin Magang (SI-MAG) ke PT Telkom Indonesia.',
                     'Tolong buatkan Surat Rekomendasi Beasiswa Djarum.',
                   ].map((sample) => (
                     <button

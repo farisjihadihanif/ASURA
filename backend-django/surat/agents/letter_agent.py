@@ -847,7 +847,7 @@ class SuratDraftingAgent:
         missing_fields = slot_mgr.get_missing_fields()
 
         def _get_first_payload() -> Dict[str, Any]:
-            cleaned = {k: serialize_payload_value(v) for k, v in first_payload.items()}
+            cleaned = {k: serialize_payload_value(v, field_name=k) for k, v in first_payload.items()}
             return BackendCompatiblePayloadDict(
                 cleaned,
                 has_incomplete_required_slots=bool(missing_fields),
@@ -1102,7 +1102,7 @@ class SuratDraftingAgent:
         # Pastikan to_payload_dict mengembalikan BackendCompatiblePayloadDict yang sinkron
         # dengan pengecekan `has_null_required` di `_execute_redraft_agent_worker` (views.py#L380-L384)
         def _get_merged_payload() -> Dict[str, Any]:
-            cleaned = {k: serialize_payload_value(v) for k, v in merged_payload.items()}
+            cleaned = {k: serialize_payload_value(v, field_name=k) for k, v in merged_payload.items()}
             return BackendCompatiblePayloadDict(
                 cleaned,
                 has_incomplete_required_slots=bool(missing_after_merge),

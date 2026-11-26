@@ -264,7 +264,7 @@ export const LecturerApprovalsPage: React.FC = () => {
                     <strong className="text-[#27211e]">
                       {detail.nama_mahasiswa}
                     </strong>{" "}
-                    ({detail.nim_mahasiswa}) â€” {detail.prodi_mahasiswa},{" "}
+                    ({detail.nim_mahasiswa}) — {detail.prodi_mahasiswa},{" "}
                     {detail.fakultas_mahasiswa}
                   </p>
                   {detail.nomor_surat_resmi && (

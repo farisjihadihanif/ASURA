@@ -169,3 +169,40 @@ class LogoutAPIView(APIView):
                     "refresh": [str(e)]
                 }
             }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TokenRefreshAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        refresh_token = request.data.get("refresh")
+        if not refresh_token:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Refresh token wajib disertakan.",
+                    "errors": {"refresh": ["This field is required."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = RefreshToken(refresh_token)
+            user_id = token.get("user_id")
+            user_obj = User.objects.filter(pk=user_id).first()
+            if not user_obj:
+                return Response(
+                    {"status": "error", "message": "Pengguna tidak ditemukan."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            access = token.access_token
+            access["user_id"] = user_obj.id
+            access["role"] = user_obj.role
+            access["nip_nim"] = user_obj.nip_nim
+            return Response({"access": str(access)}, status=status.HTTP_200_OK)
+        except TokenError:
+            return Response(
+                {"status": "error", "message": "Refresh token tidak valid atau sudah kedaluwarsa."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )

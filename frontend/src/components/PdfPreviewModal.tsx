@@ -93,14 +93,6 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({ requestId, onC
       setPrinting(false);
     }
   };
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   return (
     <div
       className="fixed inset-0 z-50 bg-[#27211e]/50 backdrop-blur-xs flex items-center justify-center p-4"

@@ -1,7 +1,10 @@
+import logging
 import uuid
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from accounts.models import User, Faculty, Department, Lecturer, Student, Course, StudentCourse
+
+logger = logging.getLogger(__name__)
 
 
 class SuratStatus(models.TextChoices):
@@ -305,43 +308,57 @@ ChatMessage.save = _smart_chat_message_save
 # === ASURA_CUSTOM_REQUEST_GUARD ===
 _orig_surat_request_save = SuratRequest.save
 def _guarded_surat_request_save(self, *args, **kwargs):
+    update_fields = kwargs.get("update_fields")
+    update_fields_set = set(update_fields) if update_fields is not None else None
+    is_status_or_delivery_only = (
+        update_fields_set is not None
+        and update_fields_set.issubset({"status", "chosen_destination", "target_destination_address", "nomor_surat_resmi"})
+    )
     try:
         kode = str(getattr(getattr(self, "kode_surat", None), "kode_surat", "") or "").upper()
         if kode.startswith("CUSTOM"):
-            pdata = dict(getattr(self, "payload_data", None) or {})
-            pdata["_is_custom_personal"] = True
-            self.payload_data = pdata
-            cur_body = str(getattr(self, "final_approved_content", "") or getattr(self, "ai_original_draft", "") or "").strip()
-            is_slop_or_empty = (
-                not cur_body
-                or "fakultas teknik universitas yang bersangkutan" in cur_body.lower()
-                or "tata naskah dinas resmi perguruan tinggi" in cur_body.lower()
-                or "mahasiswa bersangkutan" in cur_body.lower()
-                or "kelengkapan administratif" in cur_body.lower()
-            )
-            if is_slop_or_empty and getattr(self, "student_id", None):
-                from .services.custom_letter_ai import generate_custom_letter_body
-                hist = []
-                if self.id:
-                    th = ChatThread.objects.filter(latest_surat_request_id=self.id).first()
-                    if th:
-                        hist = [{"sender": r.sender, "text": r.message} for r in th.messages.order_by("created_at")]
-                body_txt = generate_custom_letter_body(
-                    student=self.student,
-                    payload_data=pdata,
-                    user_prompt_context=str(getattr(self, "user_prompt_context", "") or ""),
-                    history_messages=hist,
-                    kode_surat=kode,
+            if not is_status_or_delivery_only:
+                pdata = dict(getattr(self, "payload_data", None) or {})
+                pdata["_is_custom_personal"] = True
+                self.payload_data = pdata
+                cur_body = str(getattr(self, "final_approved_content", "") or getattr(self, "ai_original_draft", "") or "").strip()
+                is_slop_or_empty = (
+                    not cur_body
+                    or "fakultas teknik universitas yang bersangkutan" in cur_body.lower()
+                    or "tata naskah dinas resmi perguruan tinggi" in cur_body.lower()
+                    or "mahasiswa bersangkutan" in cur_body.lower()
+                    or "kelengkapan administratif" in cur_body.lower()
                 )
-                self.ai_original_draft = body_txt
-                self.final_approved_content = body_txt
-            self.status = SuratStatus.APPROVED
-    except Exception:
-        pass
+                if is_slop_or_empty and getattr(self, "student_id", None):
+                    from .services.custom_letter_ai import generate_custom_letter_body
+                    hist = []
+                    th = getattr(self, "chat_thread", None)
+                    if th is None and self.id:
+                        th = ChatThread.objects.filter(surat_requests=self).order_by("-updated_at").first()
+                    if th is not None:
+                        hist = [{"sender": r.sender, "text": r.message} for r in th.messages.order_by("created_at")]
+                    body_txt = generate_custom_letter_body(
+                        student=self.student,
+                        payload_data=pdata,
+                        user_prompt_context=str(getattr(self, "user_prompt_context", "") or ""),
+                        history_messages=hist,
+                        kode_surat=kode,
+                    )
+                    self.ai_original_draft = body_txt
+                    self.final_approved_content = body_txt
+            if self.status not in (
+                SuratStatus.APPROVED,
+                SuratStatus.SENT,
+                SuratStatus.PRINTED,
+                SuratStatus.FAILED,
+            ):
+                self.status = SuratStatus.APPROVED
+    except Exception as exc:
+        logger.warning("Gagal menjalankan pre-save guard SuratRequest id=%s: %s", getattr(self, "id", None), exc)
     res = _orig_surat_request_save(self, *args, **kwargs)
     try:
         kode = str(getattr(getattr(self, "kode_surat", None), "kode_surat", "") or "").upper()
-        if kode.startswith("CUSTOM") and self.id:
+        if kode.startswith("CUSTOM") and self.id and not is_status_or_delivery_only:
             SuratApproval.objects.filter(surat_request_id=self.id).delete()
             from .services.pdf_generator_safe import generate_and_save_official_pdf
             st = self.student
@@ -361,7 +378,7 @@ def _guarded_surat_request_save(self, *args, **kwargs):
                 "isi_surat": self.final_approved_content or self.ai_original_draft or "",
                 "payload": pdata,
             })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Gagal menjalankan post-save PDF guard SuratRequest id=%s: %s", getattr(self, "id", None), exc)
     return res
 SuratRequest.save = _guarded_surat_request_save

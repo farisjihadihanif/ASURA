@@ -37,7 +37,9 @@ def create_tte_signature(surat_request, signer=None):
         token=token
     )
 
-    qr_code_url = f"https://auto-surat-backend.onrender.com/surat/verify/{token}/"
+    from django.conf import settings
+    base_url = str(getattr(settings, "PUBLIC_VERIFY_BASE_URL", "https://auto-surat-backend.onrender.com")).rstrip("/")
+    qr_code_url = f"{base_url}/surat/verify/{token}/"
 
     return {
         "instance": tte_instance,

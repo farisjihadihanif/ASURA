@@ -9,6 +9,10 @@ class User(models.Model):
     role = models.CharField(max_length=20)  # STUDENT / LECTURER / ADMIN
     email = models.EmailField(blank=True, default="")
 
+    is_authenticated = True
+    is_anonymous = False
+    is_active = True
+
     class Meta:
         db_table = 'users'
 

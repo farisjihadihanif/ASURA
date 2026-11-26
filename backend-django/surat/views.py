@@ -96,30 +96,28 @@ def _execute_drafting_agent_worker(
             dynamic_fields_dict=dynamic_fields_dict,
         )
 
-        if hasattr(draft_output, "to_payload_dict") and callable(draft_output.to_payload_dict):
-            structured_payload: Dict[str, Any] = draft_output.to_payload_dict()
-        elif hasattr(draft_output, "extracted_payload"):
-            payload_obj = draft_output.extracted_payload
-            structured_payload = (
-                payload_obj.model_dump(mode="json")
-                if hasattr(payload_obj, "model_dump")
-                else dict(payload_obj)
-            )
-        else:
-            structured_payload = dict(initial_payload or {})
+        from .agents import evaluate_draft_readiness
+
+        readiness = evaluate_draft_readiness(
+            draft_output=draft_output,
+            kode_surat=kode_surat,
+            dynamic_fields_dict=dynamic_fields_dict,
+            agent=active_agent,
+        )
+        structured_payload = readiness["structured_payload"] or dict(initial_payload or {})
 
         surat_req = SuratRequest.objects.select_related(
             "student", "student__user", "student__prodi", "student__fakultas", "kode_surat"
         ).get(pk=surat_request_id)
         surat_req.payload_data = structured_payload
-        surat_req.ai_original_draft = draft_output.ai_original_draft
-        surat_req.self_critique_score = draft_output.evaluation.self_critique_score
-        surat_req.revision_notes = list(draft_output.evaluation.revision_notes)
+        surat_req.ai_original_draft = getattr(draft_output, "ai_original_draft", "")
+        surat_req.self_critique_score = readiness["critique_score"]
+        surat_req.revision_notes = readiness["revision_notes"]
 
-        critique_score = draft_output.evaluation.self_critique_score
-        has_missing_info = getattr(draft_output.evaluation, "has_missing_info", False)
+        has_missing_info = getattr(getattr(draft_output, "evaluation", None), "has_missing_info", False)
+        is_ready = readiness["is_ready_for_approval"] and not has_missing_info
 
-        if critique_score < 7 or has_missing_info:
+        if not is_ready:
             surat_req.status = SuratStatus.REVISION_REQUIRED
             surat_req.save(
                 update_fields=[
@@ -391,6 +389,13 @@ class ChatSessionMessageAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request, thread_id):
+        thread = ChatThread.objects.filter(id=thread_id, user=request.user).first()
+        if not thread:
+            return Response(
+                {"status": "error", "message": "Sesi chat atau thread tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         user_msg = request.data.get("message", "").strip()
         attachment_files = request.FILES.getlist('attachments')
 
@@ -410,13 +415,6 @@ class ChatSessionMessageAPIView(APIView):
             return Response(
                 {"status": "error", "message": "Pesan atau berkas lampiran tidak boleh kosong."},
                 status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        thread = ChatThread.objects.filter(id=thread_id, user=request.user).first()
-        if not thread:
-            return Response(
-                {"status": "error", "message": "Sesi chat atau thread tidak ditemukan."},
-                status=status.HTTP_404_NOT_FOUND,
             )
 
         multimodal_parts = []
@@ -881,7 +879,7 @@ class SuratRequestListAPIView(ListAPIView):
             return SuratRequest.objects.filter(student=user.student_profile).order_by('-created_at')
         if hasattr(user, 'lecturer_profile'):
             lecturer = user.lecturer_profile
-            demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', True)
+            demo_enabled = getattr(settings, 'DEMO_ONE_STEP_APPROVAL', False)
             demo_approver_nip = getattr(settings, 'DEMO_APPROVER_NIP', '198001012005011001')
             is_demo_lecturer = getattr(user, 'nip_nim', None) == demo_approver_nip
             # Dosen hanya mengurus surat kampus. Surat custom (pribadi) tidak pernah tampil di dashboard dosen.

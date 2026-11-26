@@ -152,7 +152,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Jakarta'
 
 USE_I18N = True
 
@@ -247,6 +247,7 @@ BREVO_API_KEY = _load_live_env_var('BREVO_API_KEY')
 RESEND_API_KEY = _load_live_env_var('RESEND_API_KEY')
 DEFAULT_FROM_EMAIL = _load_live_env_var('DEFAULT_FROM_EMAIL', 'bintangwp123@gmail.com')
 TELEGRAM_BOT_TOKEN = _load_live_env_var('TELEGRAM_BOT_TOKEN')
+PUBLIC_VERIFY_BASE_URL = _load_live_env_var('PUBLIC_VERIFY_BASE_URL', 'https://auto-surat-backend.onrender.com').rstrip('/')
 
 # ==============================================================================
 # KONFIGURASI DEMO ONE-STEP APPROVAL (NON-DESTRUCTIVE INTERCEPTOR)

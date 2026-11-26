@@ -192,10 +192,16 @@ class SuratExecutionTools:
         surat_type_obj = getattr(surat_request, "kode_surat", None)
 
         effective_signer = signer
-        if effective_signer is None and fakultas_obj is not None:
-            effective_signer = getattr(fakultas_obj, "dekan", None)
+        if effective_signer is None and student is not None:
+            from surat.services.manual_handlers import resolve_official_approver
+            effective_signer = resolve_official_approver(
+                student,
+                getattr(surat_type_obj, "kode_surat", None),
+            )
         if effective_signer is None and prodi_obj is not None:
             effective_signer = getattr(prodi_obj, "kaprodi", None)
+        if effective_signer is None and fakultas_obj is not None:
+            effective_signer = getattr(fakultas_obj, "dekan", None)
 
         signer_user = getattr(effective_signer, "user", None) if effective_signer is not None else None
         default_signer_nama = getattr(signer_user, "nama", None) or getattr(effective_signer, "nama", None) or ""

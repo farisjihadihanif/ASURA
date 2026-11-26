@@ -84,6 +84,19 @@ export interface SuratRequestDetail {
   signer_nip_override?: string | null;
   chosen_destination?: "email" | "telegram" | null;
   target_destination_address?: string | null;
+  attachments?: Array<{
+    id: number;
+    nama_dokumen: string;
+    file_url: string;
+    mime_type: string;
+    created_at: string;
+  }>;
+  audit_logs?: Array<{
+    id: number;
+    action_id: string;
+    action: string;
+    created_at: string;
+  }>;
   created_at: string;
   approvals: SuratApproval[];
 }

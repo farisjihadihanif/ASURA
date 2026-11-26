@@ -60,7 +60,7 @@ def is_pure_date_expression(text: str) -> bool:
         return False
     cleaned = str(text).strip().lower()
 
-    if re.match(r'^\d{1,4}[/-]\d{1,2}(:[/-]\d{1,4})$', cleaned):
+    if re.match(r'^\d{1,4}[/-]\d{1,2}(?:[/-]\d{1,4})?$', cleaned):
         return True
 
     words = re.findall(r'[a-zA-Z]+', cleaned)
@@ -103,7 +103,7 @@ def is_out_of_context_message(user_message: str) -> bool:
         "lanjut", "batal", "email", "telegram"
     }
     words = set(re.findall(r'\w+', msg_lower))
-    if ("" in user_message or any(w in words for w in ["siapa", "mengapa", "kenapa", "gimana", "berapa"])) and not words.intersection(academic_keywords):
+    if ("?" in user_message or any(w in words for w in ["siapa", "mengapa", "kenapa", "gimana", "berapa"])) and not words.intersection(academic_keywords):
         return True
 
     return False
@@ -134,7 +134,7 @@ def normalize_and_validate_date_slot(
         if not has_digit and not has_month_word:
             return None
 
-    explicit_years = re.findall(r'\b((:19|20)\d{2})\b', user_message or "")
+    explicit_years = re.findall(r'\b((?:19|20)\d{2})\b', user_message or "")
     user_specified_year = len(explicit_years) > 0 or has_attachments
     current_year = get_current_year()
 
@@ -151,7 +151,7 @@ def normalize_and_validate_date_slot(
             return None
 
     # 2. Format tanggal dengan nama bulan (contoh: "10 November" atau "10 November 2026")
-    m_named = re.search(r'\b(\d{1,2})\s+([a-zA-Z]+)(:\s+(\d{4}))\b', text)
+    m_named = re.search(r'\b(\d{1,2})\s+([a-zA-Z]+)(?:\s+(\d{4}))?\b', text)
     if m_named and m_named.group(2).lower() in MONTH_MAP:
         day = int(m_named.group(1))
         month = MONTH_MAP[m_named.group(2).lower()]
@@ -163,7 +163,7 @@ def normalize_and_validate_date_slot(
             return None
 
     # 3. Format numerik DD/MM/YYYY atau DD-MM-YYYY atau DD/MM
-    m_num = re.search(r'\b(\d{1,2})[/-](\d{1,2})(:[/-](\d{2,4}))\b', text)
+    m_num = re.search(r'\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b', text)
     if m_num:
         day = int(m_num.group(1))
         month = int(m_num.group(2))
@@ -393,7 +393,7 @@ def handle_incoming_chat_with_redis(
         
         return (
             f"Perhatian: Sesi saat ini sedang memproses **{old_surat.nama_surat}**. "
-            f"Apakah Anda ingin membatalkan draf tersebut dan beralih membuat **{new_surat.nama_surat}**\n\n"
+            f"Apakah Anda ingin membatalkan draf tersebut dan beralih membuat **{new_surat.nama_surat}**?\n\n"
             f"Silakan pilih salah satu opsi di bawah ini:"
         )
 
@@ -605,7 +605,7 @@ def extract_composite_slots_deterministically(
     extracted: Dict[str, Any] = {}
 
     # 1. Rentang Tanggal (Mulai & Selesai)
-    date_range_pattern = r'(:dari\s+)(:tanggal\s+|tgl\s+)(\d{1,2}\s+[a-zA-Z]+(:\s+\d{4})|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(:[/-]\d{2,4}))\s+(:sampai|hingga|s/d|-)\s+(:tanggal\s+|tgl\s+)(\d{1,2}\s+[a-zA-Z]+(:\s+\d{4})|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(:[/-]\d{2,4}))'
+    date_range_pattern = r'(?:dari\s+)?(?:tanggal\s+|tgl\s+)?(\d{1,2}\s+[a-zA-Z]+(?:\s+\d{4})?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(?:sampai|hingga|s/d|-)\s+(?:tanggal\s+|tgl\s+)?(\d{1,2}\s+[a-zA-Z]+(?:\s+\d{4})?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)'
     m_range = re.search(date_range_pattern, msg, re.IGNORECASE)
     if m_range:
         start_norm = normalize_and_validate_date_slot(m_range.group(1), msg)
@@ -616,15 +616,19 @@ def extract_composite_slots_deterministically(
             extracted["tanggal_selesai"] = end_norm
 
     # 2. Posisi yang Dilamar
-    pos_pattern = r'(:sebagai|posisi|jabatan|role)\s+([a-zA-Z0-9\s/_-]+)(=(:\s+dari|\s+pada|\s+di|\s+untuk|\s+tanggal|\s+tgl|\s+selama|\.|\,|$))'
+    pos_pattern = r'(?:sebagai|posisi|jabatan|role)\s+([a-zA-Z0-9\s/_-]+?)(?=(?:\s+dari|\s+pada|\s+di|\s+untuk|\s+tanggal|\s+tgl|\s+selama|\.|\,|$))'
     m_pos = re.search(pos_pattern, msg, re.IGNORECASE)
-    if m_pos and "posisi_dilamar" in required_field_keys:
+    if m_pos:
         raw_pos = m_pos.group(1).strip()
         if len(raw_pos) >= 2 and not is_pure_date_expression(raw_pos):
-            extracted["posisi_dilamar"] = " ".join(w.capitalize() for w in raw_pos.split())
+            norm_pos = " ".join(w.capitalize() for w in raw_pos.split())
+            if "posisi_dilamar" in required_field_keys:
+                extracted["posisi_dilamar"] = norm_pos
+            elif "posisi_magang" in required_field_keys:
+                extracted["posisi_magang"] = norm_pos
 
     # 3. Keperluan Surat
-    tujuan_pattern = r'(:untuk\s+keperluan|keperluan|tujuan|guna|alasan)\s+([a-zA-Z0-9\s/_-]+)(=(:\s+sebagai|\s+posisi|\s+dari|\s+pada|\s+tanggal|\s+tgl|\.|\,|$))'
+    tujuan_pattern = r'(?:untuk\s+keperluan|keperluan|tujuan|guna|alasan)\s+([a-zA-Z0-9\s/_-]+?)(?=(?:\s+sebagai|\s+posisi|\s+dari|\s+pada|\s+tanggal|\s+tgl|\.|\,|$))'
     m_tujuan = re.search(tujuan_pattern, msg, re.IGNORECASE)
     if m_tujuan:
         raw_tujuan = m_tujuan.group(1).strip()
@@ -632,19 +636,23 @@ def extract_composite_slots_deterministically(
             norm_tujuan = " ".join(w.capitalize() for w in raw_tujuan.split())
             if "tujuan_keperluan" in required_field_keys:
                 extracted["tujuan_keperluan"] = norm_tujuan
+            elif "keperluan_surat" in required_field_keys:
+                extracted["keperluan_surat"] = norm_tujuan
             elif "alasan_pengajuan" in required_field_keys:
                 extracted["alasan_pengajuan"] = norm_tujuan
+            elif "alasan_pindah" in required_field_keys:
+                extracted["alasan_pindah"] = norm_tujuan
 
     # 4. Instansi Tujuan
     if "instansi_tujuan" in required_field_keys:
-        instansi_pattern = r'^(:(:di|ke|pada|kepada)\s+)((:pt|cv|ud|yayasan|kantor|dinas|kementerian|badan)\b[a-zA-Z0-9\s\.\-_]+)(=(:\s*,\s*|\s+untuk|\s+sebagai|\s+dari|\s+tanggal|$))'
+        instansi_pattern = r'^(?:(?:di|ke|pada|kepada)\s+)?((?:pt|cv|ud|yayasan|kantor|dinas|kementerian|badan)\b[a-zA-Z0-9\s\.\-_]+?)(?=(?:\s*,\s*|\s+untuk|\s+sebagai|\s+dari|\s+tanggal|$))'
         m_instansi = re.search(instansi_pattern, msg, re.IGNORECASE)
         instansi_raw = None
         if m_instansi:
             instansi_raw = m_instansi.group(1).strip()
         else:
             # Pola alternatif: Klausa awal sebelum tanda koma pertama
-            m_comma = re.match(r'^\s*([^,]+)\s*,\s*(:untuk|sebagai|dari|tanggal)', msg, re.IGNORECASE)
+            m_comma = re.match(r'^\s*([^,]+?)\s*,\s*(?:untuk|sebagai|dari|tanggal)', msg, re.IGNORECASE)
             if m_comma:
                 cand = m_comma.group(1).strip()
                 if not is_pure_date_expression(cand) and len(cand.split()) <= 6:
@@ -879,7 +887,7 @@ def sanitize_extracted_slot(field_name: str, raw_value: Any) -> Any:
     if field_name == "instansi_tujuan":
         patterns_to_remove = [
             r'^(untuk|ke|pada|kepada|di)\s+',
-            r'^(tolong buatkan surat( rekomendasi)( beasiswa)( untuk))\s+',
+            r'^(tolong buatkan surat(?: rekomendasi)?(?: beasiswa)?(?: untuk)?)\s+',
             r'^(ditujukan ke|ditujukan kepada)\s+'
         ]
         for pattern in patterns_to_remove:
@@ -897,7 +905,7 @@ def sanitize_extracted_slot(field_name: str, raw_value: Any) -> Any:
                     text = cand
 
     # Sanitasi khusus keperluan / alasan
-    elif field_name in ["tujuan_keperluan", "alasan_pengajuan"]:
+    elif field_name in ["tujuan_keperluan", "keperluan_surat", "alasan_pengajuan", "alasan_pindah"]:
         patterns_to_remove = [
             r'^(untuk|guna|rangka|dalam rangka)\s+',
             r'^(keperluan)\s+'
@@ -912,7 +920,7 @@ def sanitize_extracted_slot(field_name: str, raw_value: Any) -> Any:
                     text = cand
 
     # Sanitasi khusus posisi yang dilamar
-    elif field_name == "posisi_dilamar":
+    elif field_name in ["posisi_dilamar", "posisi_magang"]:
         patterns_to_remove = [
             r'^(sebagai|posisi|jabatan|role)\s+',
         ]

@@ -146,6 +146,7 @@ def normalize_entity_casing(val: Any, field_name: str = "") -> Any:
     target_fields = {
         "instansi_tujuan",
         "posisi_dilamar",
+        "posisi_magang",
         "nama_beasiswa",
         "nama_instansi",
         "perusahaan",
